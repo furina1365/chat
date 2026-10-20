@@ -1,0 +1,57 @@
+# C/C++ build artifacts
+/build/
+/build-*/
+/out/
+/bin/
+/server
+*.o
+*.a
+*.so
+*.so.*
+*.d
+*.gch
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# Frontend dependencies
+node_modules/
+
+# Local test directories and binaries
+/test/
+/tests/
+/checks/
+/.scratch/
+__pycache__/
+*.py[cod]
+
+# Coverage and profiling output
+coverage/
+*.gcda
+*.gcno
+*.gcov
+
+# Runtime output
+*.log
+*.pid
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Project-local agent instructions
+/AGENTS.md
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

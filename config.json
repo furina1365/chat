@@ -1,0 +1,5 @@
+{
+  "port": 8080,
+  "io_threads": 14,
+  "worker_threads": 16
+}

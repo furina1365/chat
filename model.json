@@ -1,0 +1,15 @@
+[
+  {
+    "provider": "deepseek",
+    "api": "openai-completions",
+    "base_url": "https://api.deepseek.com",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "model": "deepseek-flash",
+    "max_output_tokens": 4096,
+    "temperature": null,
+    "top_p": null,
+    "timeout_ms": 60000,
+    "connect_timeout_ms": 10000,
+    "max_response_bytes": 4194304
+  }
+]
