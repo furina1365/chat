@@ -12,7 +12,7 @@ void HttpRouter::SetFallback(HttpHandler handler)
 
 void HttpRouter::operator()(const HttpRequest &request, const std::shared_ptr<HttpResponse> &response) const
 {
-  auto route = routes_.find({request.method, request.path});
+  auto route = routes_.find({request.method, request.path.substr(0, request.path.find('?'))});
   if (route != routes_.end())
     route->second(request, response);
   else if (fallback_)

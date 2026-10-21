@@ -13,6 +13,7 @@ class HttpConnection;
 class HttpResponse
 {
 public:
+  void SetHeader(const std::string &name, const std::string &value);
   void Reply(const std::string &status, const std::string &body,
              const std::string &type = "application/json; charset=utf-8");
   void StartStream();
@@ -28,6 +29,7 @@ private:
 
   mutable std::mutex mutex_;
   std::deque<std::string> output_;
+  std::string headers_;
   std::size_t queued_ = 0, offset_ = 0;
   bool finished_ = false, notified_ = false, overloaded_ = false, streaming_ = false;
   std::shared_ptr<std::atomic<bool>> cancel_ = std::make_shared<std::atomic<bool>>(false);

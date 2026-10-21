@@ -142,7 +142,7 @@ struct HttpServer::Impl
 
   Impl(const ServerConfig &config, HttpHandler handler)
       : config(config), handler(std::move(handler)),
-        server(config.port, [this](EventLoop *loop, int fd)
+        server(InetAddress(config.port, config.host), [this](EventLoop *loop, int fd)
         {
           return std::make_unique<HttpConnection>(loop, fd, this->handler);
         }) {}

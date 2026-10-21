@@ -1,6 +1,13 @@
 #include "Chat.hpp"
 #include "ai/ModelManager.hpp"
 #include "http/HttpRouter.hpp"
+#include "src/ChatRoutes.hpp"
+#include "src/HttpSupport.hpp"
+#include "auth/Account.hpp"
+#include "auth/Email.hpp"
+#include "auth/Session.hpp"
+#include "db/src/Support.hpp"
+#include "history/History.hpp"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -15,18 +22,6 @@ namespace
 {
   using Json = nlohmann::json;
 
-  const char *FinishName(ai::FinishReason reason)
-  {
-    switch (reason)
-    {
-    case ai::FinishReason::Stop: return "stop";
-    case ai::FinishReason::Length: return "length";
-    case ai::FinishReason::Refusal: return "refusal";
-    case ai::FinishReason::Other: return "other";
-    }
-    return "other";
-  }
-
   void Reject(const std::shared_ptr<HttpResponse> &response,
               const std::string &status, const std::string &message)
   {
@@ -37,7 +32,7 @@ namespace
   class ChatWorkers
   {
   public:
-    explicit ChatWorkers(int count)
+    explicit ChatWorkers(int count, std::size_t capacity) : capacity_(capacity)
     {
       try
       {
@@ -55,7 +50,7 @@ namespace
     bool Submit(std::shared_ptr<std::atomic<bool>> cancel, std::function<void()> run)
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (stopping_ || jobs_.size() >= 8)
+      if (stopping_ || jobs_.size() >= capacity_)
         return false;
       tokens_.erase(std::remove_if(tokens_.begin(), tokens_.end(), [](const auto &token)
                                   { return token.expired(); }), tokens_.end());
@@ -63,6 +58,16 @@ namespace
       jobs_.push_back({std::move(cancel), std::move(run)});
       ready_.notify_one();
       return true;
+    }
+
+    bool Submit(std::function<void()> run)
+    { return Submit(std::make_shared<std::atomic<bool>>(false), std::move(run)); }
+
+    void Track(const std::shared_ptr<std::atomic<bool>> &cancel)
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      tokens_.erase(std::remove_if(tokens_.begin(), tokens_.end(), [](const auto &token) { return token.expired(); }), tokens_.end());
+      tokens_.push_back(cancel);
     }
 
     void Stop()
@@ -102,7 +107,7 @@ namespace
           jobs_.pop_front();
         }
         if (!job.cancel->load())
-          job.run();
+          try { job.run(); } catch (...) { std::cerr << "业务任务执行失败\n"; }
       }
     }
 
@@ -112,117 +117,8 @@ namespace
     std::vector<std::weak_ptr<std::atomic<bool>>> tokens_;
     std::vector<std::thread> threads_;
     bool stopping_ = false;
+    std::size_t capacity_;
   };
-
-  void GenerateReply(const ai::ModelClient *client, const ai::ChatRequest &request,
-                     bool stream, const std::shared_ptr<HttpResponse> &response)
-  {
-    try
-    {
-      ai::Result<ai::ChatResponse> result;
-      if (stream)
-      {
-        auto send_text = [response](const std::string &text)
-        {
-          return response->SendEvent("delta", Json{{"text", text}}.dump());
-        };
-        auto send_reasoning = [response](const std::string &text)
-        {
-          return response->SendEvent("reasoning_delta", Json{{"text", text}}.dump());
-        };
-        result = client->Stream(request, send_text, response->cancelToken(), send_reasoning);
-      }
-      else
-        result = client->Generate(request, response->cancelToken());
-
-      if (const auto *reply = std::get_if<ai::ChatResponse>(&result))
-      {
-        Json body{{"finish_reason", FinishName(reply->finish_reason)},
-                  {"truncated", reply->finish_reason == ai::FinishReason::Length}};
-        if (stream)
-          response->SendEvent("done", body.dump(), true);
-        else
-        {
-          body["reply"] = reply->reply;
-          if (!reply->reasoning.empty())
-            body["reasoning"] = reply->reasoning;
-          response->Reply("200 OK", body.dump());
-        }
-      }
-      else
-      {
-        const auto &error = std::get<ai::Error>(result);
-        auto message = response->overloaded()
-                           ? "浏览器接收过慢，生成已停止，请重试。" : error.message;
-        if (stream)
-          response->SendEvent("error", Json{{"error", message}}.dump(), true);
-        else
-          Reject(response, error.code == ai::ErrorCode::Timeout
-                               ? "504 Gateway Timeout" : "502 Bad Gateway", message);
-      }
-    }
-    catch (...)
-    {
-      if (stream)
-        response->SendEvent("error", Json{{"error", "处理回复失败，请重试。"}}.dump(), true);
-      else
-        Reject(response, "500 Internal Server Error", "处理回复失败。");
-    }
-  }
-
-  void Chat(const HttpRequest &http_request, const std::shared_ptr<HttpResponse> &response,
-            const ai::ModelManager &models, ChatWorkers &workers)
-  {
-    ai::ChatRequest request;
-    const ai::ModelClient *client = nullptr;
-    bool stream = true;
-    try
-    {
-      auto body = Json::parse(http_request.body);
-      if (!body.is_object())
-        throw std::invalid_argument("body");
-      for (auto it = body.begin(); it != body.end(); ++it)
-        if (it.key() != "messages" && it.key() != "provider" && it.key() != "model" && it.key() != "stream")
-          throw std::invalid_argument("field");
-      client = models.Find(body.at("provider").get<std::string>(), body.at("model").get<std::string>());
-      if (!client)
-      {
-        Reject(response, "400 Bad Request", "选择的模型未配置。");
-        return;
-      }
-      stream = body.value("stream", true);
-      const auto &messages = body.at("messages");
-      if (!messages.is_array() || messages.empty() || messages.size() > 200)
-        throw std::invalid_argument("messages");
-      for (std::size_t i = 0; i < messages.size(); ++i)
-      {
-        const auto &message = messages[i];
-        if (message.at("role").get<std::string>() != (i % 2 == 0 ? "user" : "assistant"))
-          throw std::invalid_argument("role");
-        auto content = message.at("content").get<std::string>();
-        if (content.empty() || content.find_first_not_of(" \r\n\t") == content.npos)
-          throw std::invalid_argument("content");
-        request.messages.push_back({i % 2 == 0 ? ai::Role::User : ai::Role::Assistant, std::move(content)});
-      }
-      if (request.messages.back().role != ai::Role::User)
-        throw std::invalid_argument("last role");
-    }
-    catch (...)
-    {
-      Reject(response, "400 Bad Request", "请求格式无效；仅接受模型选择、消息和 stream。");
-      return;
-    }
-
-    // IO 线程仍在 handler 内，尚未发送字节；队列满时可替换成普通 503。
-    if (stream)
-      response->StartStream();
-    auto generate = [response, client, stream, request = std::move(request)]
-    {
-      GenerateReply(client, request, stream, response);
-    };
-    if (!workers.Submit(response->cancelToken(), std::move(generate)))
-      Reject(response, "503 Service Unavailable", "当前请求较多，请稍后重试。");
-  }
 
   void StaticFile(const HttpRequest &request, const std::shared_ptr<HttpResponse> &response)
   {
@@ -274,15 +170,26 @@ namespace
 int RunChatServer(const ServerConfig &config)
 {
   ai::ModelManager models("model.json");
-  ChatWorkers workers(config.worker_threads);
-  HttpRouter router;
-  router.Add("GET", "/api/models", [&models](const HttpRequest &, const auto &response)
+  db::MySql mysql(config.mysql);
+  db::Redis redis(config.redis);
   {
-    Json list = Json::array();
-    for (const auto &model : models.List())
-      list.push_back({{"provider", model.provider}, {"model", model.model}});
-    response->Reply("200 OK", Json{{"models", list}}.dump());
-  });
+    auto connection = db::Take(mysql.Acquire());
+    for (const auto *table : {"users", "conversations", "messages", "turn_requests"})
+      if (std::holds_alternative<db::Error>(connection.Query(std::string("SELECT 1 FROM ") + table + " LIMIT 0")))
+        throw std::runtime_error("数据库结构未就绪，请先导入 backend/db/schema.sql");
+  }
+  auth::Session sessions(redis, config.session);
+  auth::Email email(redis, config.email);
+  auth::Account accounts(mysql, redis, sessions, email, config.account);
+  history::History history(mysql);
+  ChatWorkers business(config.business_threads, config.business_queue_size);
+  ChatWorkers workers(config.worker_threads, config.model_queue_size);
+  chat::SubmitTask business_tasks = [&business](auto task) { return business.Submit(std::move(task)); };
+  chat::SubmitTask model_tasks = [&workers](auto task) { return workers.Submit(std::move(task)); };
+  chat::AuthHttpConfig http{config.cookie_name, config.secure_cookie, config.allowed_origins};
+  HttpRouter router;
+  chat::RegisterAuthRoutes(router, accounts, sessions, business_tasks, http);
+  chat::RegisterChatRoutes(router, sessions, history, models, business_tasks, model_tasks, http);
   router.Add("GET", "/api/hello", [](const HttpRequest &, const auto &response)
   {
     response->Reply("200 OK", "Hello from C++ HTTP server\n", "text/plain; charset=utf-8");
@@ -291,14 +198,10 @@ int RunChatServer(const ServerConfig &config)
   {
     response->Reply("200 OK", request.body, "text/plain; charset=utf-8");
   });
-  router.Add("POST", "/api/chat", [&models, &workers](const HttpRequest &request, const auto &response)
-  {
-    Chat(request, response, models, workers);
-  });
-  router.SetFallback([](const HttpRequest &request, const auto &response)
+  router.SetFallback([http](const HttpRequest &request, const auto &response)
   {
     if (request.method == "OPTIONS")
-      response->Reply("204 No Content", "");
+      chat::detail::Prepare(request, response, http);
     else if (request.method == "GET")
       StaticFile(request, response);
     else
@@ -306,10 +209,15 @@ int RunChatServer(const ServerConfig &config)
   });
 
   // Run 返回后 IO 线程已经停止；在 HTTP server 析构前取消并回收所有模型任务。
-  HttpServer server(config, router);
-  std::cout << "网页 AI 对话：http://localhost:" << config.port << "（" << models.List().size()
+  HttpServer server(config, [&router, &workers](const HttpRequest &request, const auto &response) {
+    workers.Track(response->cancelToken());
+    router(request, response);
+  });
+  const auto host = config.host.find(':') == std::string::npos ? config.host : "[" + config.host + "]";
+  std::cout << "网页 AI 对话：http://" << host << ":" << config.port << "（" << models.List().size()
             << " 个模型，worker 线程：" << config.worker_threads << "）" << std::endl;
   int result = server.Run();
   workers.Stop();
+  business.Stop();
   return result;
 }

@@ -19,4 +19,9 @@ int main(int argc, char **)
     std::cerr << error.what() << '\n';
     return 1;
   }
+  catch (const db::Error &)
+  {
+    std::cerr << "数据库暂不可用，启动失败。\n";
+    return 1;
+  }
 }

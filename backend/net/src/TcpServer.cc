@@ -19,6 +19,7 @@ namespace
       return acceptor_.Init(&net::detail::Access::Loop(*loop), fd, std::move(callback));
     }
     void Stop() { acceptor_.Stop(); }
+
   private:
     BackendAcceptor acceptor_;
   };

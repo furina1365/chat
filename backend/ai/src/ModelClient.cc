@@ -1,6 +1,7 @@
 #include "ai/ModelClient.hpp"
 #include "SseParser.hpp"
 #include "ModelResponseState.hpp"
+#include "common/Curl.hpp"
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -14,16 +15,7 @@ namespace ai
   namespace
   {
     using Json = nlohmann::json;
-    struct CurlRuntime
-    {
-      CurlRuntime()
-      {
-        if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
-          throw std::runtime_error("无法初始化 libcurl");
-      }
-      ~CurlRuntime() { curl_global_cleanup(); }
-    };
-    void InitCurl() { static CurlRuntime runtime; }
+    void InitCurl() { transport::InitCurl(); }
     struct Transfer : ModelResponseState
     {
       const ModelConfig &config;

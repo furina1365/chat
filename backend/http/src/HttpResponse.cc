@@ -1,11 +1,9 @@
 #include "http/HttpResponse.hpp"
 #include <sstream>
+#include <stdexcept>
 
 namespace
 {
-  const std::string cors = "Access-Control-Allow-Origin: *\r\n"
-                           "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                           "Access-Control-Allow-Headers: Content-Type\r\n";
   constexpr std::size_t kMaxQueuedOutput = 1024 * 1024;
 
   std::string Chunk(const std::string &data)
@@ -14,6 +12,14 @@ namespace
     header << std::hex << data.size() << "\r\n";
     return header.str() + data + "\r\n";
   }
+}
+
+void HttpResponse::SetHeader(const std::string &name, const std::string &value)
+{
+  if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != name.npos ||
+      value.find_first_of("\r\n") != value.npos) throw std::invalid_argument("无效响应头");
+  std::lock_guard<std::mutex> lock(mutex_);
+  headers_ += name + ": " + value + "\r\n";
 }
 
 bool HttpResponse::Push(std::string text, bool final)
@@ -51,7 +57,7 @@ void HttpResponse::Reply(const std::string &status, const std::string &body, con
     queued_ = offset_ = 0;
     streaming_ = false;
   }
-  Push("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\n" + cors +
+  Push("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\n" + headers_ +
        "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body, true);
 }
 
@@ -62,7 +68,7 @@ void HttpResponse::StartStream()
     streaming_ = true;
   }
   Push("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
-       "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\nTransfer-Encoding: chunked\r\n" + cors +
+       "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\nTransfer-Encoding: chunked\r\n" + headers_ +
        "Connection: close\r\n\r\n" + Chunk(": connected\n\n"));
 }
 
