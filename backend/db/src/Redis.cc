@@ -34,7 +34,7 @@ struct Redis::Impl
     options.host = config.host;
     options.port = config.port;
     if (!config.username.empty()) options.user = config.username;
-    options.password = Password(config.password_env);
+    options.password = config.password;
     options.db = config.database;
     options.connect_timeout = config.connect_timeout;
     options.socket_timeout = config.io_timeout;

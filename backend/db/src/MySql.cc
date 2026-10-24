@@ -114,11 +114,11 @@ struct MySql::Impl
   detail::Pool<soci::session> pool;
   explicit Impl(const MySqlConfig &config)
       : pool(config.pool_size, config.acquire_timeout,
-          [config, password = Password(config.password_env)] {
+          [config] {
             InitThread();
             std::string options = "host=" + QuoteOption(config.host)
                 + " db=" + QuoteOption(config.database) + " user=" + QuoteOption(config.username)
-                + " password=" + QuoteOption(password) + " port=" + std::to_string(config.port)
+                + " password=" + QuoteOption(config.password) + " port=" + std::to_string(config.port)
                 + " charset=utf8mb4 connect_timeout=" + std::to_string(config.connect_timeout.count())
                 + " read_timeout=" + std::to_string(config.io_timeout.count())
                 + " write_timeout=" + std::to_string(config.io_timeout.count());

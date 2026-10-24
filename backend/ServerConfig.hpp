@@ -12,7 +12,7 @@
 struct ServerConfig
 {
   std::string host = "0.0.0.0";
-  std::uint16_t port = 8080;
+  std::uint16_t port = 53411;
   int io_threads = 0; // 0：按 CPU 逻辑核数自动配置，不包含主线程。
   int worker_threads = 2;
   int business_threads = 4;

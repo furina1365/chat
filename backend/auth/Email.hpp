@@ -27,7 +27,7 @@ namespace auth
     std::uint16_t port = 465;
     SmtpSecurity security = SmtpSecurity::Tls;
     std::string username;
-    std::string password_env;
+    std::string password;
     std::string from_address;
     std::string from_name;
     std::string ca_file; // 留空使用系统证书；私有 SMTP 可指定 CA 文件。

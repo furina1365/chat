@@ -16,7 +16,7 @@ namespace db
     std::string host = "127.0.0.1";
     std::uint16_t port = 6379;
     std::string username;
-    std::string password_env;
+    std::string password;
     int database = 0;
     std::size_t pool_size = 8;
     std::chrono::milliseconds acquire_timeout{1000};

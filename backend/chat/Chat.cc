@@ -169,7 +169,7 @@ namespace
 
 int RunChatServer(const ServerConfig &config)
 {
-  ai::ModelManager models("model.json");
+  ai::ModelManager models("config.json");
   db::MySql mysql(config.mysql);
   db::Redis redis(config.redis);
   {

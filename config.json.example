@@ -1,0 +1,85 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 53411,
+    "io_threads": 14,
+    "worker_threads": 16,
+    "business_threads": 4,
+    "business_queue_size": 64,
+    "model_queue_size": 8
+  },
+  "mysql": {
+    "host": "mysql",
+    "port": 3306,
+    "database": "chat",
+    "username": "chat",
+    "pool_size": 8,
+    "acquire_timeout_ms": 1000,
+    "connect_timeout_seconds": 5,
+    "io_timeout_seconds": 5,
+    "password": "replace-with-a-database-password"
+  },
+  "redis": {
+    "host": "redis",
+    "port": 6379,
+    "username": "",
+    "database": 0,
+    "pool_size": 8,
+    "acquire_timeout_ms": 1000,
+    "connect_timeout_ms": 3000,
+    "io_timeout_ms": 3000,
+    "password": ""
+  },
+  "auth": {
+    "registration_enabled": true,
+    "min_password_length": 15,
+    "max_password_length": 128,
+    "key_namespace": "auth:account",
+    "login_attempts": 10,
+    "login_window_seconds": 300,
+    "operation_attempts": 20,
+    "operation_window_seconds": 60,
+    "password_verification_seconds": 300,
+    "session_namespace": "auth:session",
+    "session_idle_seconds": 86400,
+    "session_absolute_seconds": 604800,
+    "cookie_name": "chat_session",
+    "secure_cookie": false,
+    "allowed_origins": []
+  },
+  "email": {
+    "key_namespace": "auth:email",
+    "code_timeout_seconds": 600,
+    "resend_interval_seconds": 60,
+    "max_code_attempts": 5,
+    "smtp": {
+      "host": "",
+      "port": 465,
+      "security": "tls",
+      "username": "",
+      "from_address": "",
+      "from_name": "Chat",
+      "ca_file": "",
+      "timeout_ms": 10000,
+      "password": ""
+    }
+  },
+  "models": [
+    {
+      "provider": "deepseek",
+      "api": "openai-completions",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "max_output_tokens": 4096,
+      "temperature": null,
+      "top_p": null,
+      "timeout_ms": 60000,
+      "connect_timeout_ms": 10000,
+      "max_response_bytes": 4194304,
+      "api_key": "replace-with-a-model-api-key"
+    }
+  ],
+  "docker": {
+    "mysql_root_password": "replace-with-a-different-root-password"
+  }
+}

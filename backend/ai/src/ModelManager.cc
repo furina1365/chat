@@ -7,7 +7,6 @@
 #include <curl/curl.h>
 #include <climits>
 #include <cmath>
-#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 
@@ -87,7 +86,8 @@ namespace ai
     Json models;
     try
     {
-      models = Json::parse(file);
+      auto root = Json::parse(file);
+      models = root.at("models");
     }
     catch (...)
     {
@@ -106,7 +106,6 @@ namespace ai
       while (!config.base_url.empty() && config.base_url.back() == '/')
         config.base_url.pop_back();
       ValidateUrl(config.base_url);
-      config.api_key_env = Required(item, "api_key_env");
       auto api = Required(item, "api");
       if (api == "openai-completions")
         config.api = Api::OpenAICompletions;
@@ -125,12 +124,7 @@ namespace ai
       config.timeout = std::chrono::milliseconds(Positive(item, "timeout_ms", 60000, INT_MAX));
       config.connect_timeout = std::chrono::milliseconds(Positive(item, "connect_timeout_ms", 10000, INT_MAX));
       config.max_response_bytes = Positive(item, "max_response_bytes", 4 * 1024 * 1024, 64 * 1024 * 1024);
-      const char *secret = std::getenv(config.api_key_env.c_str());
-      if (!secret || !*secret)
-        throw std::runtime_error("模型 API Key 环境变量未设置");
-      std::string key(secret);
-      if (key.find_first_of("\r\n") != key.npos)
-        throw std::runtime_error("模型 API Key 格式无效");
+      auto key = Required(item, "api_key");
       ModelKey id{config.provider, config.model};
       if (models_.count(id))
         throw std::runtime_error("模型配置 provider/model 重复");

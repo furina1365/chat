@@ -40,9 +40,9 @@ coverage/
 *.pid
 
 # Local configuration and credentials
+/config.json
 .env
 .env.*
-!.env.example
 
 # Project-local agent instructions
 /AGENTS.md

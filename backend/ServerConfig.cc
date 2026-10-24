@@ -112,14 +112,14 @@ void LoadEmail(const Json &object, auth::EmailConfig &config)
   config.max_code_attempts = ReadNumber(object, "max_code_attempts", config.max_code_attempts, 1, "email.", 20);
   if (!object.contains("smtp")) return;
   const auto &smtp = object["smtp"];
-  CheckFields(smtp, "email.smtp", {"host", "port", "security", "username", "password_env", "from_address", "from_name", "ca_file", "timeout_ms"});
+  CheckFields(smtp, "email.smtp", {"host", "port", "security", "username", "password", "from_address", "from_name", "ca_file", "timeout_ms"});
   config.smtp.host = ReadString(smtp, "host", config.smtp.host, "email.smtp.", true);
   config.smtp.port = ReadNumber(smtp, "port", config.smtp.port, 1, "email.smtp.", 65535);
   auto security = ReadString(smtp, "security", "tls", "email.smtp.");
   if (security != "tls" && security != "starttls") throw std::runtime_error("email.smtp.security 须为 tls 或 starttls");
   config.smtp.security = security == "tls" ? auth::SmtpSecurity::Tls : auth::SmtpSecurity::StartTls;
   config.smtp.username = ReadString(smtp, "username", config.smtp.username, "email.smtp.", true);
-  config.smtp.password_env = ReadString(smtp, "password_env", config.smtp.password_env, "email.smtp.", true);
+  config.smtp.password = ReadString(smtp, "password", config.smtp.password, "email.smtp.", true);
   config.smtp.from_address = ReadString(smtp, "from_address", config.smtp.from_address, "email.smtp.", true);
   config.smtp.from_name = ReadString(smtp, "from_name", config.smtp.from_name, "email.smtp.", true);
   config.smtp.ca_file = ReadString(smtp, "ca_file", config.smtp.ca_file, "email.smtp.", true);
@@ -128,14 +128,14 @@ void LoadEmail(const Json &object, auth::EmailConfig &config)
 
 void LoadMySql(const Json &object, db::MySqlConfig &config)
 {
-  CheckFields(object, "mysql", {"host", "port", "database", "username", "password_env",
+  CheckFields(object, "mysql", {"host", "port", "database", "username", "password",
                                "pool_size", "acquire_timeout_ms", "connect_timeout_seconds",
                                "io_timeout_seconds"});
   config.host = ReadString(object, "host", config.host, "mysql.");
   config.port = static_cast<std::uint16_t>(ReadNumber(object, "port", config.port, 1, "mysql.", 65535));
   config.database = ReadString(object, "database", config.database, "mysql.");
   config.username = ReadString(object, "username", config.username, "mysql.");
-  config.password_env = ReadString(object, "password_env", config.password_env, "mysql.", true);
+  config.password = ReadString(object, "password", config.password, "mysql.", true);
   config.pool_size = ReadNumber(object, "pool_size", static_cast<int>(config.pool_size), 1, "mysql.");
   config.acquire_timeout = std::chrono::milliseconds(ReadNumber(
       object, "acquire_timeout_ms", static_cast<int>(config.acquire_timeout.count()), 1, "mysql."));
@@ -147,12 +147,12 @@ void LoadMySql(const Json &object, db::MySqlConfig &config)
 
 void LoadRedis(const Json &object, db::RedisConfig &config)
 {
-  CheckFields(object, "redis", {"host", "port", "username", "password_env", "database",
+  CheckFields(object, "redis", {"host", "port", "username", "password", "database",
                                "pool_size", "acquire_timeout_ms", "connect_timeout_ms", "io_timeout_ms"});
   config.host = ReadString(object, "host", config.host, "redis.");
   config.port = static_cast<std::uint16_t>(ReadNumber(object, "port", config.port, 1, "redis.", 65535));
   config.username = ReadString(object, "username", config.username, "redis.", true);
-  config.password_env = ReadString(object, "password_env", config.password_env, "redis.", true);
+  config.password = ReadString(object, "password", config.password, "redis.", true);
   config.database = ReadNumber(object, "database", config.database, 0, "redis.");
   config.pool_size = ReadNumber(object, "pool_size", static_cast<int>(config.pool_size), 1, "redis.");
   config.acquire_timeout = std::chrono::milliseconds(ReadNumber(
@@ -184,7 +184,15 @@ ServerConfig LoadServerConfig(const char *path)
         throw std::runtime_error("重复配置项：" + value.get<std::string>());
       return true;
     });
-    CheckFields(root, "", {"server", "mysql", "redis", "auth", "email"});
+    CheckFields(root, "", {"server", "mysql", "redis", "auth", "email", "models", "docker"});
+
+    if (root.contains("docker"))
+    {
+      CheckFields(root["docker"], "docker", {"mysql_root_password"});
+      ReadString(root["docker"], "mysql_root_password", "", "docker.", true);
+    }
+    if (root.contains("models") && !root["models"].is_array())
+      throw std::runtime_error("models 必须是数组");
 
     ServerConfig config;
     if (root.contains("server"))
@@ -196,6 +204,10 @@ ServerConfig LoadServerConfig(const char *path)
     if (root.contains("auth")) LoadAuth(root.at("auth"), config);
     if (root.contains("email")) LoadEmail(root.at("email"), config.email);
     return config;
+  }
+  catch (const Json::parse_error &)
+  {
+    throw std::runtime_error(std::string(path) + "：配置不是有效 JSON");
   }
   catch (const std::exception &error)
   {

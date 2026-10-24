@@ -16,7 +16,7 @@ namespace db
     std::uint16_t port = 3306;
     std::string database;
     std::string username;
-    std::string password_env;
+    std::string password;
     std::size_t pool_size = 8;
     std::chrono::milliseconds acquire_timeout{1000};
     std::chrono::seconds connect_timeout{5};

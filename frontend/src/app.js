@@ -1,6 +1,6 @@
 const host = window.location.hostname || 'localhost';
 const apiBase = location.protocol !== 'file:' && location.port !== '8000'
-  ? location.origin : `http://${host.includes(':') ? `[${host.replace(/^\[|\]$/g, '')}]` : host}:8080`;
+  ? location.origin : `http://${host.includes(':') ? `[${host.replace(/^\[|\]$/g, '')}]` : host}:53411`;
 const $ = (selector) => document.querySelector(selector);
 const shell = $('.app-shell');
 const workspace = $('#workspace');

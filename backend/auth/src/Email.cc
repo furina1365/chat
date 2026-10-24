@@ -73,7 +73,7 @@ struct Email::Impl
   }
 };
 Email::Email(db::Redis &redis, const EmailConfig &config)
-    : impl_(std::make_unique<Impl>(Impl{redis, config, db::Password(config.smtp.host.empty() ? "" : config.smtp.password_env)}))
+    : impl_(std::make_unique<Impl>(Impl{redis, config, config.smtp.password}))
 {
   if (config.code_timeout.count() <= 0 || config.resend_interval.count() <= 0 || !config.max_code_attempts)
     throw std::invalid_argument("无效的验证码配置");

@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!CMakeLists.txt
+!backend/
+!backend/**
+!frontend/
+!frontend/**
+**/node_modules/
+**/__pycache__/
+**/*.log

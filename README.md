@@ -14,7 +14,15 @@ curl、OpenSSL 和 MySQL Client 使用系统安装的头文件和库。MySQL 使
 
 HTTP 请求由 [llhttp 9.4.3](https://github.com/nodejs/llhttp/releases/tag/release/v9.4.3) 增量解析；官方生成的 C 源码、头文件和许可证保存在 `backend/llhttp/`，随 CMake 编译，无需 Node.js 或构建时下载。
 
-先创建 MySQL 数据库和应用账号，在 `config.json` 填写对应连接配置，再导入初始表结构。以下命令按示例数据库 `chat` 和账号 `chat` 执行：
+先从模板创建本地配置，填写数据库、Redis、SMTP 和模型连接信息及密码、API Key：
+
+```bash
+cp config.json.example config.json
+```
+
+仓库只提交 `config.json.example`，实际 `config.json` 已被 Git 和 Docker 构建上下文忽略。模板使用 Docker 服务名；本机运行时将 `mysql.host` 和 `redis.host` 改成实际地址。
+
+创建 MySQL 数据库和应用账号，再导入初始表结构。以下命令按示例数据库 `chat` 和账号 `chat` 执行：
 
 ```bash
 mysql -h 127.0.0.1 -u chat -p chat < backend/db/schema.sql
@@ -22,17 +30,15 @@ mysql -h 127.0.0.1 -u chat -p chat < backend/db/schema.sql
 
 `schema.sql` 创建 InnoDB 表、唯一约束和外键，不创建数据库或数据库用户。运行账号需要这些表的 SELECT、INSERT、UPDATE、DELETE 权限，导入结构时另需 CREATE、REFERENCES 权限。启动会检查账号及历史表是否就绪。
 
-在项目根目录构建并启动，设置数据库密码与 `model.json` 引用的密钥（默认 `DEEPSEEK_API_KEY`）：
+在项目根目录构建并启动：
 
 ```bash
-export CHAT_MYSQL_PASSWORD='数据库账号的密码'
-export DEEPSEEK_API_KEY='模型密钥'
 cmake -S . -B build
 cmake --build build -j
 ./build/server
 ```
 
-打开 [http://localhost:8080](http://localhost:8080)，同一服务提供页面和接口。Enter 发送，Shift+Enter 换行，生成时发送按钮变成停止按钮。开发时也可用 `python3 -m http.server 8000 --directory frontend` 单独提供前端，在 `auth.allowed_origins` 中加入 `http://localhost:8000`，并以相同主机名访问 8080 接口。浏览器请求会携带 Cookie。
+打开 [http://localhost:53411](http://localhost:53411)，同一服务提供页面和接口。Enter 发送，Shift+Enter 换行，生成时发送按钮变成停止按钮。开发时也可用 `python3 -m http.server 8000 --directory frontend` 单独提供前端，在 `auth.allowed_origins` 中加入 `http://localhost:8000`，并以相同主机名访问 53411 接口。浏览器请求会携带 Cookie。
 
 回复支持 Markdown 标题、嵌套列表、引用、表格、任务列表、链接、图片、删除线和代码高亮。公式使用 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 及 `math` 代码块；普通代码中的这些符号保留原样。流式回复和历史记录共用同一个渲染器。模型输出的原始 HTML 作为文字展示，生成的 HTML 经过 DOMPurify 清理。
 
@@ -59,15 +65,15 @@ npm run vendor
 
 依赖版本固定在 `frontend/package-lock.json`，许可证保存在 `frontend/vendor/THIRD-PARTY-NOTICES.txt`。
 
-程序生成在 `build/server`。程序固定读取当前工作目录下的 `config.json` 和 `model.json`，因此从项目根目录运行，不再接受端口参数。修改配置后重启生效。
+程序生成在 `build/server`。程序固定读取当前工作目录下的 `config.json`，因此从项目根目录运行，不再接受端口参数。修改配置后重启生效。
 
-`config.json` 控制监听地址、端口、线程数，以及 MySQL、Redis 的连接参数：
+`config.json` 集中保存服务、MySQL、Redis、认证、SMTP 和模型配置。完整示例见 `config.json.example`，主要字段如下：
 
 ```json
 {
   "server": {
     "host": "0.0.0.0",
-    "port": 8080,
+    "port": 53411,
     "io_threads": 14,
     "worker_threads": 16,
     "business_threads": 4,
@@ -79,7 +85,7 @@ npm run vendor
     "port": 3306,
     "database": "chat",
     "username": "",
-    "password_env": "",
+    "password": "",
     "pool_size": 8,
     "acquire_timeout_ms": 1000,
     "connect_timeout_seconds": 5,
@@ -89,7 +95,7 @@ npm run vendor
     "host": "127.0.0.1",
     "port": 6379,
     "username": "",
-    "password_env": "",
+    "password": "",
     "database": 0,
     "pool_size": 8,
     "acquire_timeout_ms": 1000,
@@ -123,7 +129,7 @@ npm run vendor
       "port": 465,
       "security": "tls",
       "username": "",
-      "password_env": "",
+      "password": "",
       "from_address": "",
       "from_name": "Chat",
       "ca_file": "",
@@ -133,13 +139,13 @@ npm run vendor
 }
 ```
 
-`server` 集中配置监听地址、端口和线程数，可省略，也可只覆盖部分字段。`server.host` 默认 `0.0.0.0`，监听所有 IPv4 网卡，其他设备可通过服务器的局域网 IP 访问。设为 `127.0.0.1` 时仅允许本机 IPv4 访问；`::1` 监听 IPv6 本机地址，浏览器使用 `http://[::1]:8080`。也可填写本机主机名，绑定解析得到的第一个 IPv4 或 IPv6 地址。地址无法解析或绑定时启动失败，修改后重启生效。
+`server` 集中配置监听地址、端口和线程数，可省略，也可只覆盖部分字段。`server.host` 默认 `0.0.0.0`，监听所有 IPv4 网卡，其他设备可通过服务器的局域网 IP 访问。设为 `127.0.0.1` 时仅允许本机 IPv4 访问；`::1` 监听 IPv6 本机地址，浏览器使用 `http://[::1]:53411`。也可填写本机主机名，绑定解析得到的第一个 IPv4 或 IPv6 地址。地址无法解析或绑定时启动失败，修改后重启生效。
 
-项目配置为 14 个 IO 线程、16 个模型 worker。`io_threads` 为 0 时按 CPU 逻辑核数自动配置，正整数指定处理连接的 IO 线程数。这些线程之外还有一个负责接入连接的主线程。`worker_threads` 是执行模型调用的线程数，必须为正整数；账号、密码哈希、邮件和历史访问使用 `business_threads` 个独立业务线程，默认 4 个；因此服务自身线程总数为 `1 + 实际 IO 线程数 + worker_threads + business_threads`。`business_queue_size` 和 `model_queue_size` 分别限制排队任务，默认 64 和 8，满时返回 503。上述线程与队列配置对 Reactor 和 Proactor 都生效；省略字段时，端口默认 8080、IO 线程数自动计算、worker 默认 2 个。配置缺失、格式错误、未知或重复字段、端口越界及非法线程数会报错退出。
+项目配置为 14 个 IO 线程、16 个模型 worker。`io_threads` 为 0 时按 CPU 逻辑核数自动配置，正整数指定处理连接的 IO 线程数。这些线程之外还有一个负责接入连接的主线程。`worker_threads` 是执行模型调用的线程数，必须为正整数；账号、密码哈希、邮件和历史访问使用 `business_threads` 个独立业务线程，默认 4 个；因此服务自身线程总数为 `1 + 实际 IO 线程数 + worker_threads + business_threads`。`business_queue_size` 和 `model_queue_size` 分别限制排队任务，默认 64 和 8，满时返回 503。上述线程与队列配置对 Reactor 和 Proactor 都生效；省略字段时，端口默认 53411、IO 线程数自动计算、worker 默认 2 个。配置缺失、格式错误、未知或重复字段、端口越界及非法线程数会报错退出。
 
 `mysql` 和 `redis` 可省略，也可只填写需要覆盖的字段，其余使用数据库配置结构中的默认值。`pool_size` 为每个服务实例的连接池上限，`acquire_timeout_ms` 为等待借用连接的毫秒数。MySQL 的连接及 IO 超时使用秒，Redis 使用毫秒；端口范围为 1–65535，连接池大小和超时必须为正整数，Redis 的 `database` 为非负整数。嵌套对象中的未知或重复字段同样会报错。
 
-MySQL 的 `database`、`username` 按实际账号填写，示例不会创建数据库或用户。`password_env` 填保存密码的环境变量名，实际连接时读取；空字符串表示不提供密码。Redis 的 `username` 可留空。启动时建立并检查真实连接，连接池按需扩展到上限；运行期连接故障会丢弃坏连接，后续请求重新建立连接。写入结果未知时不自动重放。
+MySQL 的 `database`、`username` 按实际账号填写，示例不会创建数据库或用户。`password` 直接填写连接密码；空字符串表示不提供密码。Redis 的 `username` 可留空。启动时建立并检查真实连接，连接池按需扩展到上限；运行期连接故障会丢弃坏连接，后续请求重新建立连接。写入结果未知时不自动重放。
 
 Linux 上 MySQL 的 `host=localhost` 使用 Unix socket，`host=127.0.0.1` 使用 TCP。使用 `auth_socket` 认证的本机账号应配置 `localhost`，并以对应的系统用户启动服务。
 
@@ -151,7 +157,7 @@ MySQL 语句通过 SOCI `use()` 绑定参数；其 MySQL 后端采用客户端�
 
 示例 `auth.secure_cookie=false` 用于本机 HTTP 调试；HTTPS 部署设为 `true`。允许来源填写完整的来源（协议、主机、可选端口），不含路径或通配符，默认只允许同源。Cookie 使用 HttpOnly、SameSite=Lax；前端不保存密码、会话凭据或聊天内容到 localStorage。原有匿名本地历史保留在浏览器，不自动迁入任何账号。
 
-`email.smtp.host` 留空时邮箱功能不可用，用户名注册和登录仍可使用。配置现有邮箱 SMTP 时填写主机、端口、`security`（`tls` 或 `starttls`）、用户名、发件邮箱及 `password_env` 指向的授权码环境变量。例如设置 `password_env` 为 `CHAT_SMTP_PASSWORD` 后，在启动终端导出该环境变量。`ca_file` 留空使用系统证书；不会关闭证书验证。验证码默认 600 秒有效，60 秒后可重发，最多尝试 5 次。
+`email.smtp.host` 留空时邮箱功能不可用，用户名注册和登录仍可使用。配置现有邮箱 SMTP 时填写主机、端口、`security`（`tls` 或 `starttls`）、用户名、发件邮箱及 `password` 中的 SMTP 授权码。`ca_file` 留空使用系统证书；不会关闭证书验证。验证码默认 600 秒有效，60 秒后可重发，最多尝试 5 次。
 
 首次配置默认构建 io_uring Proactor，需要允许使用 io_uring 的 Linux 内核。在 `build` 目录中可以直接切换并编译 epoll Reactor：
 
@@ -173,9 +179,57 @@ make proactor
 
 Ctrl+C 或 SIGTERM 停止服务，运行中的模型调用会取消，工作线程随后退出。
 
+## Docker Compose
+
+从 `config.json.example` 复制出 `config.json`，填写 `mysql.password`、`docker.mysql_root_password`、`models[].api_key` 和 `email.smtp.password`。MySQL 应用账号和 root 使用不同密码。
+
+Docker 配置使用 `mysql.host=mysql`、`mysql.username=chat`、`mysql.database=chat`，以及 `redis.host=redis`。服务监听地址为 `0.0.0.0:53411`。
+
+通过 Python 3 入口启动；脚本从 `config.json` 读取 MySQL 初始化密码并调用 Compose：
+
+```bash
+python3 docker/compose.py up -d --build --wait
+```
+
+打开 [http://localhost:53411](http://localhost:53411)。四个服务通过 Compose 网络连接：
+
+```text
+浏览器 → Nginx（宿主机 53411）→ Chat（容器 53411）
+                               ├→ MySQL（mysql:3306）
+                               └→ Redis（redis:6379）
+```
+
+Nginx 代理页面及 API，保留原始 Host，并关闭响应缓冲以转发 SSE。只有 Nginx 发布宿主机端口。MySQL、Redis 健康检查通过后启动 Chat，Chat 就绪后启动 Nginx。四个容器配置为随 Docker 重启，手动停止后保持停止。
+
+MySQL 首次启动时自动创建 `chat` 数据库与账号，执行 `backend/db/schema.sql`，再将应用账号权限收敛为 SELECT、INSERT、UPDATE、DELETE。MySQL 数据和 Redis AOF 分别保存在 `mysql_data`、`redis_data` 命名卷中。已有卷不会重新执行初始化 SQL；修改 `config.json` 密码也不会自动修改卷内的数据库密码。
+
+常用命令：
+
+```bash
+python3 docker/compose.py ps
+python3 docker/compose.py logs -f chat
+python3 docker/compose.py restart chat
+python3 docker/compose.py down
+```
+
+`down` 保留数据库与 Redis 数据。需要清空全部账号、历史、会话并重新初始化时：
+
+```bash
+python3 docker/compose.py down -v
+python3 docker/compose.py up -d --build --wait
+```
+
+从 apt 服务迁移且确认容器运行正常后，在项目根目录执行以下脚本，卸载宿主机的 MySQL、Redis，并删除其旧数据目录：
+
+```bash
+sudo bash docker/remove-host-services.sh
+```
+
+应用镜像使用 `Dockerfile` 分阶段构建，包含程序、前端资源和动态库，以 UID 10001 的 `chat` 用户运行；`config.json` 只读挂载，文件需允许该用户读取。Docker 镜像固定构建 Reactor，并行数默认 2，可通过 `python3 docker/compose.py build --build-arg BUILD_JOBS=4 chat` 调整。
+
 ## 模型配置
 
-`model.json` 是模型配置数组。API 类型采用 Pi 的命名：
+`config.json` 的 `models` 字段是模型配置数组。API 类型采用 Pi 的命名：
 
 | `api` | 调用路径 |
 | --- | --- |
@@ -191,7 +245,7 @@ Ctrl+C 或 SIGTERM 停止服务，运行中的模型调用会取消，工作线�
     "provider": "deepseek",
     "api": "openai-completions",
     "base_url": "https://api.deepseek.com",
-    "api_key_env": "DEEPSEEK_API_KEY",
+    "api_key": "replace-with-a-model-api-key",
     "model": "deepseek-flash",
     "max_output_tokens": 4096,
     "temperature": null,
@@ -203,7 +257,7 @@ Ctrl+C 或 SIGTERM 停止服务，运行中的模型调用会取消，工作线�
 ]
 ```
 
-密钥只从服务端环境读取，不写入配置或返回前端。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
+密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
 
 超时与大小配置必须为正整数：`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间，`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
 

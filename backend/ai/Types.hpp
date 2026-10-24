@@ -13,7 +13,7 @@
 
 namespace ai
 {
-// 沿用 Pi 的 API 类型命名，对应 model.json 中的 api 字段。
+// 沿用 Pi 的 API 类型命名，对应 config.json 的 models 数组中的 api 字段。
 enum class Api
 {
   OpenAICompletions, // openai-completions
@@ -26,15 +26,14 @@ struct ModelConfig
   std::string provider;
   Api api;
   std::string base_url;    // API 根路径，例如 https://example.com/v1。
-  std::string api_key_env;
   std::string model;
 
-  // 仅从 model.json 加载；缺省或 null 表示使用上游默认值。
+  // 仅从 config.json 的 models 数组加载；缺省或 null 表示使用上游默认值。
   std::optional<std::uint64_t> max_output_tokens;
   std::optional<double> temperature;
   std::optional<double> top_p;
 
-  // model.json 中的 timeout_ms、connect_timeout_ms 和 max_response_bytes。
+  // config.json 的 models 数组中的 timeout_ms、connect_timeout_ms 和 max_response_bytes。
   // timeout 是调用总时长；客户端开始调用时据此计算 deadline。
   std::chrono::milliseconds timeout{60000};
   std::chrono::milliseconds connect_timeout{10000};
