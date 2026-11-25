@@ -64,6 +64,10 @@ coverage/
 /AGENTS.md
 .arcade-cache/
 
+# Local SSE idle-timeout change documents
+/docs/changes/sse-idle-timeout.md
+/docs/changes/sse-idle-timeout-execution.md
+
 # Editor and OS files
 .vscode/
 .idea/

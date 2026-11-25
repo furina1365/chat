@@ -21,7 +21,7 @@ public:
       HandleEvent(events);
     });
     channel_.SetEvents(EPOLLIN);
-    timer_id_ = timer_queue_->AddTimer(NowMs() + kIdleTimeoutMs, [this]
+    timer_id_ = timer_queue_->AddTimer(last_active_ + kIdleTimeoutMs, [this]
     {
       HandleIdleTimeout();
     });
@@ -47,15 +47,15 @@ public:
     {
       return;
     }
-    // 到点时差值恰好可能等于阈值，必须用 >=，否则会推迟一个周期。
-    if (NowMs() - last_active_ >= kIdleTimeoutMs)
+    const auto deadline = last_active_ + kIdleTimeoutMs;
+    if (NowMs() >= deadline)
     {
       LOG_INFO("idle timeout, close fd=%d", channel_.fd());
       Close();
     }
     else
     {
-      timer_id_ = timer_queue_->AddTimer(NowMs() + kIdleTimeoutMs, [this]
+      timer_id_ = timer_queue_->AddTimer(deadline, [this]
       {
         HandleIdleTimeout();
       });
@@ -239,6 +239,7 @@ private:
       ssize_t n = send(connectionFd, out_.peek(), out_.readableBytes(), 0);
       if (n > 0)
       {
+        last_active_ = NowMs();
         out_.retrieve(static_cast<size_t>(n));
       }
       else if (n < 0 && errno == EAGAIN)
