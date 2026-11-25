@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   username VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   password_hash VARCHAR(255) CHARACTER SET ascii NOT NULL,
   email VARCHAR(254) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  disabled BOOLEAN NOT NULL DEFAULT FALSE,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   UNIQUE KEY users_username (username),

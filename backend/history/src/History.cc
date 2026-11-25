@@ -60,6 +60,51 @@ struct History::Impl
     if (rows.values.empty()) throw Error{ErrorCode::NotFound, "消息不存在。"};
     return ReadMessage(rows.values.front());
   }
+  std::vector<Message> Context(db::MySql::Connection &connection, ConversationId conversation, MessageId last, std::size_t limit)
+  {
+    std::vector<Message> messages;
+    std::set<MessageId> seen;
+    for (std::optional<MessageId> id = last; id;)
+    {
+      if (messages.size() >= limit || !seen.insert(*id).second)
+        throw Error{ErrorCode::InvalidRequest, "对话过长，请新建对话继续。"};
+      auto message = Read(connection, conversation, *id);
+      id = message.parent_id;
+      messages.push_back(std::move(message));
+    }
+    std::reverse(messages.begin(), messages.end());
+    return messages;
+  }
+  ConversationView View(db::MySql::Connection &connection, const Row &row)
+  {
+    ConversationView view{ReadConversation(row), {}};
+    if (!view.conversation.current_message_id) return view;
+    view.messages = Context(connection, view.conversation.id, *view.conversation.current_message_id, 500);
+    std::string placeholders;
+    db::SqlParams params{view.conversation.id};
+    for (const auto &message : view.messages)
+      if (message.role == Role::Assistant && message.state != MessageState::Generating)
+      {
+        placeholders += placeholders.empty() ? "?" : ",?";
+        params.emplace_back(message.id);
+      }
+    if (placeholders.empty()) return view;
+    auto versions = db::Take(connection.Query(
+        "SELECT selected.id,COUNT(sibling.id),SUM(sibling.id<=selected.id),"
+        "MAX(CASE WHEN sibling.id<selected.id THEN sibling.id END),"
+        "MIN(CASE WHEN sibling.id>selected.id THEN sibling.id END) "
+        "FROM messages selected JOIN messages sibling ON sibling.conversation_id=selected.conversation_id "
+        "AND sibling.parent_id=selected.parent_id AND sibling.role='assistant' AND sibling.state<>'generating' "
+        "WHERE selected.conversation_id=? AND selected.id IN (" + placeholders + ") GROUP BY selected.id", params));
+    for (const auto &version : versions.values)
+      for (auto &message : view.messages)
+        if (message.id == db::Number(version, 0))
+        {
+          message.versions = ReplyVersions{db::Number(version, 2), db::Number(version, 1), OptionalId(version, 3), OptionalId(version, 4)};
+          break;
+        }
+    return view;
+  }
   void Expire(db::MySql::Connection &connection, Row &row)
   {
     if (row[6] && db::Number(row, 7) <= static_cast<std::uint64_t>(db::NowMs()))
@@ -182,6 +227,50 @@ Result<Conversation> History::Get(UserId user, ConversationId conversation)
     return ReadConversation(row);
   });
 }
+Result<ConversationView> History::GetView(UserId user, ConversationId conversation)
+{
+  return Guard<ConversationView>([&] {
+    auto connection = db::Take(impl_->mysql.Acquire());
+    db::Take(connection.Begin());
+    auto row = impl_->Owner(connection, user, conversation, true);
+    impl_->Expire(connection, row);
+    auto view = impl_->View(connection, row);
+    db::Take(connection.Commit());
+    return view;
+  });
+}
+Result<ConversationView> History::SelectReply(UserId user, ConversationId conversation, MessageId reply)
+{
+  return Guard<ConversationView>([&] {
+    auto connection = db::Take(impl_->mysql.Acquire());
+    db::Take(connection.Begin());
+    auto row = impl_->Owner(connection, user, conversation, true);
+    impl_->Expire(connection, row);
+    if (row[6]) throw Error{ErrorCode::Conflict, "请等待当前回复生成结束后再切换版本。"};
+    auto message = impl_->Read(connection, conversation, reply);
+    if (message.role != Role::Assistant || message.state == MessageState::Generating)
+      throw Error{ErrorCode::InvalidRequest, "请选择已结束生成的助手回复。"};
+    auto last = reply;
+    std::set<MessageId> seen{reply};
+    for (;;)
+    {
+      auto children = db::Take(connection.Query(
+          "SELECT id FROM messages WHERE conversation_id=? AND parent_id=? AND state<>'generating' ORDER BY id DESC LIMIT 1",
+          {conversation, last}));
+      if (children.values.empty()) break;
+      last = db::Number(children.values.front(), 0);
+      if (seen.size() >= 500 || !seen.insert(last).second)
+        throw Error{ErrorCode::InvalidRequest, "对话过长，请新建对话继续。"};
+    }
+    auto now = db::NowMs();
+    db::Take(connection.Execute("UPDATE conversations SET current_message_id=?,updated_at=? WHERE id=? AND user_id=?", {last, now, conversation, user}));
+    row[3] = std::to_string(last);
+    row[5] = std::to_string(now);
+    auto view = impl_->View(connection, row);
+    db::Take(connection.Commit());
+    return view;
+  });
+}
 Result<ConversationPage> History::List(UserId user, std::size_t limit, const std::optional<ConversationCursor> &before)
 {
   return Guard<ConversationPage>([&] {
@@ -252,17 +341,7 @@ Result<std::vector<Message>> History::Context(UserId user, ConversationId conver
     Limit(limit, 500);
     auto connection = db::Take(impl_->mysql.Acquire());
     impl_->Owner(connection, user, conversation);
-    std::vector<Message> messages;
-    std::set<MessageId> seen;
-    for (std::optional<MessageId> id = last; id;)
-    {
-      if (messages.size() >= limit || !seen.insert(*id).second) throw Error{ErrorCode::InvalidRequest, "对话过长，请新建对话继续。"};
-      auto message = impl_->Read(connection, conversation, *id);
-      id = message.parent_id;
-      messages.push_back(std::move(message));
-    }
-    std::reverse(messages.begin(), messages.end());
-    return messages;
+    return impl_->Context(connection, conversation, last, limit);
   });
 }
 Result<Turn> History::BeginTurn(UserId user, ConversationId conversation, const std::string &request, const std::string &content)

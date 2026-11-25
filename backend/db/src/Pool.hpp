@@ -29,7 +29,7 @@ public:
        std::function<T *()> create, std::function<void(T *)> destroy)
       : limit_(limit), timeout_(timeout), create_(std::move(create)), destroy_(std::move(destroy))
   {
-    if (!limit_ || timeout_.count() <= 0) throw std::invalid_argument("无效的连接池配置");
+    if (!limit_ || timeout_.count() <= 0) throw std::invalid_argument("Invalid connection pool configuration");
     idle_.push_back(create_());
     total_ = 1;
   }

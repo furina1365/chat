@@ -11,6 +11,11 @@
 *.d
 *.gch
 
+# Deployment packages
+/deploy/docker/*.tar
+/deploy/docker/*.tar.gz
+/deploy/binary/*.tar.gz
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
@@ -41,11 +46,23 @@ coverage/
 
 # Local configuration and credentials
 /config.json
+/config.json.*
+!/config.json.example
+/model.json
+/nginx.conf
+/nginx.conf.*
+!/nginx.conf.example
+/compose.override.yaml
 .env
 .env.*
+/.aws/
+/.codex/
+*.postman_environment.json
+*.postman_globals.json
 
-# Project-local agent instructions
+# Project-local agent instructions and analysis caches
 /AGENTS.md
+.arcade-cache/
 
 # Editor and OS files
 .vscode/

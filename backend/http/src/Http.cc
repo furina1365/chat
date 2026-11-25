@@ -157,7 +157,7 @@ int HttpServer::Run()
   PrepareServerProcess();
   if (!impl_->server.Init(impl_->config.io_threads))
     return 1;
-  std::cout << "HTTP IO 线程：" << impl_->server.ioThreadCount() << std::endl;
+  std::cout << "HTTP IO threads: " << impl_->server.ioThreadCount() << std::endl;
   impl_->server.Loop();
   return 0;
 }

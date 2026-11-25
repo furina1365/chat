@@ -59,6 +59,14 @@ namespace history
     std::optional<MessageId> active_message_id = std::nullopt;
   };
 
+  struct ReplyVersions
+  {
+    std::uint64_t index = 1;
+    std::uint64_t total = 1;
+    std::optional<MessageId> previous_id;
+    std::optional<MessageId> next_id;
+  };
+
   struct Message
   {
     MessageId id = 0;
@@ -72,6 +80,13 @@ namespace history
     std::string error;
     TimePoint created_at{};
     TimePoint updated_at{};
+    std::optional<ReplyVersions> versions = std::nullopt;
+  };
+
+  struct ConversationView
+  {
+    Conversation conversation;
+    std::vector<Message> messages;
   };
 
   struct ConversationCursor

@@ -1,4 +1,4 @@
-// 只在更新 Markdown 依赖时执行；生成的 vendor 文件随项目提交。
+// 生成的浏览器脚本与 vendor 资源随项目提交。
 const fs = require('node:fs');
 const path = require('node:path');
 const esbuild = require('esbuild');
@@ -10,14 +10,33 @@ async function build() {
   fs.mkdirSync(path.join(vendor, 'fonts'), { recursive: true });
   await esbuild.build({
     absWorkingDir: root,
-    entryPoints: ['src/markdown.js'],
+    entryPoints: ['src/markdown.ts'],
     outfile: 'vendor/markdown.js',
     bundle: true,
     format: 'iife',
     globalName: 'ChatMarkdown',
     target: ['es2020'],
+    supported: { 'template-literal': false },
     minify: true,
     legalComments: 'inline',
+  });
+  await esbuild.build({
+    absWorkingDir: root,
+    entryPoints: ['src/app.ts'],
+    outfile: 'src/app.js',
+    bundle: true,
+    format: 'iife',
+    target: ['es2020'],
+    banner: { js: '// Generated from TypeScript by npm run build; edit src/*.ts.' },
+  });
+  await esbuild.build({
+    absWorkingDir: root,
+    entryPoints: ['src/admin.ts'],
+    outfile: 'src/admin.js',
+    bundle: true,
+    format: 'iife',
+    target: ['es2020'],
+    banner: { js: '// Generated from TypeScript by npm run build; edit src/*.ts.' },
   });
   fs.rmSync(path.join(vendor, 'markdown.js.LEGAL.txt'), { force: true });
   // 现代浏览器使用 WOFF2；不复制重复的 WOFF/TTF 字体。

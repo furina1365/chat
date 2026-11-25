@@ -1,16 +1,11 @@
 cmake_minimum_required(VERSION 3.23)
 project(chat LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenSSL REQUIRED)
 include(FetchContent)
-if(POLICY CMP0135)
-  cmake_policy(SET CMP0135 NEW)
-endif()
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-set(DISABLE_TESTS ON CACHE BOOL "" FORCE)
-set(ENABLE_SSL OFF CACHE BOOL "" FORCE)
+set(DISABLE_TESTS ON)
 FetchContent_Declare(hiredis
   URL https://github.com/redis/hiredis/archive/refs/tags/v1.3.0.tar.gz
   URL_HASH SHA256=25cee4500f359cf5cad3b51ed62059aadfc0939b05150c1f19c7e2829123631c)
@@ -23,10 +18,8 @@ file(COPY ${HIREDIS_HEADERS} DESTINATION "${HIREDIS_BUILD_INCLUDE}/hiredis")
 file(WRITE "${hiredis_BINARY_DIR}/hiredis-config.cmake"
   "set(hiredis_FOUND TRUE)\nset(hiredis_INCLUDE_DIRS \"${HIREDIS_BUILD_INCLUDE}\")\n")
 set(hiredis_DIR "${hiredis_BINARY_DIR}")
-set(REDIS_PLUS_PLUS_BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(REDIS_PLUS_PLUS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
-set(REDIS_PLUS_PLUS_CXX_STANDARD 17 CACHE STRING "" FORCE)
+set(REDIS_PLUS_PLUS_BUILD_SHARED OFF)
+set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
 FetchContent_Declare(redis_plus_plus
   URL https://github.com/sewenew/redis-plus-plus/archive/refs/tags/1.3.15.tar.gz
   URL_HASH SHA256=e9288fda74f1501c62dd9ab7d6a8dc67de51aa4d5b7c71770baa51987a945941)
@@ -36,14 +29,11 @@ FetchContent_Declare(fmt
   URL https://github.com/fmtlib/fmt/archive/refs/tags/11.2.0.tar.gz
   URL_HASH SHA256=bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af)
 FetchContent_MakeAvailable(fmt)
-set(SOCI_SHARED OFF CACHE BOOL "" FORCE)
-set(SOCI_TESTS OFF CACHE BOOL "" FORCE)
-set(SOCI_INSTALL OFF CACHE BOOL "" FORCE)
-set(SOCI_LTO OFF CACHE BOOL "" FORCE)
-set(WITH_BOOST OFF CACHE BOOL "" FORCE)
-set(SOCI_MYSQL ON CACHE STRING "" FORCE)
+set(SOCI_LTO OFF)
+set(WITH_BOOST OFF)
+set(SOCI_MYSQL ON)
 foreach(backend DB2 EMPTY FIREBIRD ODBC ORACLE POSTGRESQL SQLITE3)
-  set(SOCI_${backend} OFF CACHE STRING "" FORCE)
+  set(SOCI_${backend} OFF)
 endforeach()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 FetchContent_Declare(soci
@@ -88,7 +78,3 @@ foreach(backend reactor proactor)
     VERBATIM
   )
 endforeach()
-
-file(GLOB_RECURSE FRONTEND_SOURCES CONFIGURE_DEPENDS frontend/*)
-list(FILTER FRONTEND_SOURCES EXCLUDE REGEX "/node_modules/")
-add_custom_target(frontend SOURCES ${FRONTEND_SOURCES})

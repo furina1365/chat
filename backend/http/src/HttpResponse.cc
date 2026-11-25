@@ -50,15 +50,16 @@ bool HttpResponse::Push(std::string text, bool final)
 
 void HttpResponse::Reply(const std::string &status, const std::string &body, const std::string &type)
 {
+  bool streaming;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    // 流尚未开始发送时，可用普通错误响应替换它（例如任务队列已满）。
-    output_.clear();
-    queued_ = offset_ = 0;
-    streaming_ = false;
+    streaming = streaming_;
   }
-  Push("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\n" + headers_ +
-       "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body, true);
+  if (streaming)
+    SendEvent("error", body, true);
+  else
+    Push("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\n" + headers_ +
+         "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body, true);
 }
 
 void HttpResponse::StartStream()

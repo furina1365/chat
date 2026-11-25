@@ -1,2 +1,0 @@
-REVOKE ALL PRIVILEGES ON chat.* FROM 'chat'@'%';
-GRANT SELECT, INSERT, UPDATE, DELETE ON chat.* TO 'chat'@'%';

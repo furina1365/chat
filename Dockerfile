@@ -20,13 +20,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl libcurl4t64 libmysqlclient21 libssl3t64 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 chat \
-    && useradd --uid 10001 --gid chat --no-create-home --shell /usr/sbin/nologin chat
+    && groupadd --gid 10001 server \
+    && useradd --uid 10001 --gid server --no-create-home --shell /usr/sbin/nologin server
 
 WORKDIR /app
 COPY --from=build /src/build/server ./build/server
 COPY frontend/ ./frontend/
 
-USER chat
+USER server
 EXPOSE 53411
 CMD ["./build/server"]

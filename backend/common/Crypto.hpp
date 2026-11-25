@@ -18,7 +18,7 @@ inline std::string Hex(const unsigned char *data, std::size_t size)
 inline std::string Random(std::size_t bytes = 32)
 {
   std::vector<unsigned char> buffer(bytes);
-  if (RAND_bytes(buffer.data(), buffer.size()) != 1) throw std::runtime_error("随机数生成失败");
+  if (RAND_bytes(buffer.data(), buffer.size()) != 1) throw std::runtime_error("Random number generation failed");
   return Hex(buffer.data(), buffer.size());
 }
 inline std::string Hash(const std::string &value)
@@ -26,7 +26,7 @@ inline std::string Hash(const std::string &value)
   std::array<unsigned char, 32> buffer{};
   unsigned int size = 0;
   if (EVP_Digest(value.data(), value.size(), buffer.data(), &size, EVP_sha256(), nullptr) != 1)
-    throw std::runtime_error("摘要计算失败");
+    throw std::runtime_error("Digest computation failed");
   return Hex(buffer.data(), size);
 }
 }

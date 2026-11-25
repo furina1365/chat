@@ -1,4 +1,4 @@
-#include "chat/Chat.hpp"
+#include "core/Chat.hpp"
 #include "ServerConfig.hpp"
 #include <iostream>
 
@@ -6,7 +6,7 @@ int main(int argc, char **)
 {
   if (argc != 1)
   {
-    std::cerr << "用法：server（启动配置请修改 config.json）\n";
+    std::cerr << "Usage: server (edit config.json to configure startup)\n";
     return 1;
   }
 
@@ -21,7 +21,7 @@ int main(int argc, char **)
   }
   catch (const db::Error &)
   {
-    std::cerr << "数据库暂不可用，启动失败。\n";
+    std::cerr << "Database unavailable; startup failed.\n";
     return 1;
   }
 }

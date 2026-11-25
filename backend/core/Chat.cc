@@ -1,11 +1,11 @@
 #include "Chat.hpp"
 #include "ai/ModelManager.hpp"
 #include "http/HttpRouter.hpp"
+#include "src/AuthRoutes.hpp"
+#include "src/AdminRoutes.hpp"
 #include "src/ChatRoutes.hpp"
 #include "src/HttpSupport.hpp"
-#include "auth/Account.hpp"
-#include "auth/Email.hpp"
-#include "auth/Session.hpp"
+#include "auth/Auth.hpp"
 #include "db/src/Support.hpp"
 #include "history/History.hpp"
 
@@ -107,7 +107,7 @@ namespace
           jobs_.pop_front();
         }
         if (!job.cancel->load())
-          try { job.run(); } catch (...) { std::cerr << "业务任务执行失败\n"; }
+          job.run();
       }
     }
 
@@ -130,18 +130,26 @@ namespace
     static const std::map<std::string, Asset> files{
         {"/", {"index.html", "text/html; charset=utf-8"}},
         {"/index.html", {"index.html", "text/html; charset=utf-8"}},
+        {"/admin", {"admin.html", "text/html; charset=utf-8"}},
+        {"/admin/", {"admin.html", "text/html; charset=utf-8"}},
+        {"/src/admin.js", {"src/admin.js", "text/javascript; charset=utf-8"}},
+        {"/src/admin.css", {"src/admin.css", "text/css; charset=utf-8"}},
         {"/src/app.js", {"src/app.js", "text/javascript; charset=utf-8"}},
         {"/src/styles.css", {"src/styles.css", "text/css; charset=utf-8"}},
         {"/vendor/markdown.js", {"vendor/markdown.js", "text/javascript; charset=utf-8"}},
         {"/vendor/katex.css", {"vendor/katex.css", "text/css; charset=utf-8"}},
         {"/favicon.svg", {"favicon.svg", "image/svg+xml"}}};
-    auto item = files.find(request.path);
+    const auto path = request.path.substr(0, request.path.find('?'));
+    auto item = files.find(path);
     Asset asset;
     if (item != files.end())
       asset = item->second;
-    else if (request.path.rfind("/vendor/fonts/", 0) == 0)
+    else if (path.rfind("/c/", 0) == 0 && path.size() > 3 &&
+             path.find_first_not_of("0123456789", 3) == path.npos)
+      asset = {"index.html", "text/html; charset=utf-8"};
+    else if (path.rfind("/vendor/fonts/", 0) == 0)
     {
-      const auto name = request.path.substr(14);
+      const auto name = path.substr(14);
       if (name.rfind("KaTeX_", 0) != 0 || name.size() < 12 ||
           name.substr(name.size() - 6) != ".woff2" || name.find("..") != name.npos ||
           name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.") != name.npos)
@@ -176,20 +184,24 @@ int RunChatServer(const ServerConfig &config)
     auto connection = db::Take(mysql.Acquire());
     for (const auto *table : {"users", "conversations", "messages", "turn_requests"})
       if (std::holds_alternative<db::Error>(connection.Query(std::string("SELECT 1 FROM ") + table + " LIMIT 0")))
-        throw std::runtime_error("数据库结构未就绪，请先导入 backend/db/schema.sql");
+        throw std::runtime_error("Database schema is not ready; import backend/db/schema.sql first");
   }
-  auth::Session sessions(redis, config.session);
-  auth::Email email(redis, config.email);
-  auth::Account accounts(mysql, redis, sessions, email, config.account);
+  {
+    auto connection = db::Take(mysql.Acquire());
+    if (std::holds_alternative<db::Error>(connection.Query("SELECT disabled FROM users LIMIT 0")))
+      throw std::runtime_error("Import backend/db/migrations/20261114-admin.sql before starting");
+  }
+  auth::Auth auth(mysql, redis, config.auth);
   history::History history(mysql);
   ChatWorkers business(config.business_threads, config.business_queue_size);
   ChatWorkers workers(config.worker_threads, config.model_queue_size);
   chat::SubmitTask business_tasks = [&business](auto task) { return business.Submit(std::move(task)); };
   chat::SubmitTask model_tasks = [&workers](auto task) { return workers.Submit(std::move(task)); };
-  chat::AuthHttpConfig http{config.cookie_name, config.secure_cookie, config.allowed_origins};
+  chat::AuthHttpConfig http{config.cookie_name, config.secure_cookie, config.allowed_origins, config.auth.session_idle_timeout};
   HttpRouter router;
-  chat::RegisterAuthRoutes(router, accounts, sessions, business_tasks, http);
-  chat::RegisterChatRoutes(router, sessions, history, models, business_tasks, model_tasks, http);
+  chat::RegisterAuthRoutes(router, auth, business_tasks, http);
+  chat::RegisterAdminRoutes(router, auth, business_tasks, http);
+  chat::RegisterChatRoutes(router, auth, history, models, business_tasks, model_tasks, http);
   router.Add("GET", "/api/hello", [](const HttpRequest &, const auto &response)
   {
     response->Reply("200 OK", "Hello from C++ HTTP server\n", "text/plain; charset=utf-8");
@@ -210,12 +222,14 @@ int RunChatServer(const ServerConfig &config)
 
   // Run 返回后 IO 线程已经停止；在 HTTP server 析构前取消并回收所有模型任务。
   HttpServer server(config, [&router, &workers](const HttpRequest &request, const auto &response) {
-    workers.Track(response->cancelToken());
-    router(request, response);
+    chat::detail::Safely(response, [&] {
+      workers.Track(response->cancelToken());
+      router(request, response);
+    });
   });
   const auto host = config.host.find(':') == std::string::npos ? config.host : "[" + config.host + "]";
-  std::cout << "网页 AI 对话：http://" << host << ":" << config.port << "（" << models.List().size()
-            << " 个模型，worker 线程：" << config.worker_threads << "）" << std::endl;
+  std::cout << "AI chat: http://" << host << ":" << config.port << " (" << models.List().size()
+            << " models, worker threads: " << config.worker_threads << ")" << std::endl;
   int result = server.Run();
   workers.Stop();
   business.Stop();

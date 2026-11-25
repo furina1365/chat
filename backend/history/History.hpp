@@ -27,6 +27,10 @@ namespace history
 
     Result<Conversation> Create(UserId user_id, const std::string &title);
     Result<Conversation> Get(UserId user_id, ConversationId conversation_id);
+    Result<ConversationView> GetView(UserId user_id, ConversationId conversation_id);
+    // 切换到指定回复，恢复该分支已有的最新续聊；生成期间返回 Conflict。
+    Result<ConversationView> SelectReply(UserId user_id, ConversationId conversation_id,
+                                          MessageId assistant_message_id);
     Result<ConversationPage> List(UserId user_id, std::size_t limit = 50,
                                   const std::optional<ConversationCursor> &before = std::nullopt);
     Status Rename(UserId user_id, ConversationId conversation_id, const std::string &title);

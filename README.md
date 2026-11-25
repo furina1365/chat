@@ -1,6 +1,6 @@
 # 网页 AI 对话
 
-原生 HTML/CSS/JavaScript 前端与 C++17 后端。支持选择模型、多轮文字对话、SSE 流式回复、停止生成、新建/删除会话、复制回复和重新生成。支持用户名/已验证邮箱登录、邮箱绑定和密码找回；账号与聊天历史保存在 MySQL，设备会话、验证码和共享限流保存在 Redis。
+原生 HTML/CSS/TypeScript 前端与 C++17 后端。支持选择模型、多轮文字对话、SSE 流式回复、停止生成、新建/删除会话、复制回复和重新生成。支持用户名/已验证邮箱登录、邮箱绑定和密码找回；账号与聊天历史保存在 MySQL，设备会话、验证码和共享限流保存在 Redis。
 
 ## 启动
 
@@ -14,21 +14,35 @@ curl、OpenSSL 和 MySQL Client 使用系统安装的头文件和库。MySQL 使
 
 HTTP 请求由 [llhttp 9.4.3](https://github.com/nodejs/llhttp/releases/tag/release/v9.4.3) 增量解析；官方生成的 C 源码、头文件和许可证保存在 `backend/llhttp/`，随 CMake 编译，无需 Node.js 或构建时下载。
 
-先从模板创建本地配置，填写数据库、Redis、SMTP 和模型连接信息及密码、API Key：
+从 [示例配置](config.json.example) 创建本地 `config.json`，再填写实际连接信息和凭据。
 
 ```bash
 cp config.json.example config.json
 ```
 
-仓库只提交 `config.json.example`，实际 `config.json` 已被 Git 和 Docker 构建上下文忽略。模板使用 Docker 服务名；本机运行时将 `mysql.host` 和 `redis.host` 改成实际地址。
+`config.json.example` 中的 `example_*`、`example-*`、`example:`、`api.example.invalid` 和 `replace-with-*` 都是占位值。MySQL 和 Redis 的地址示例为本机 `127.0.0.1`。真实数据库账号、密码、SMTP 授权码、管理员密码哈希和模型 API Key 写在本地 `config.json`，该文件已被 Git 和 Docker 构建上下文忽略。SMTP 字段留空时关闭邮件功能；Redis 未启用认证时，用户名和密码可留空。
 
-创建 MySQL 数据库和应用账号，再导入初始表结构。以下命令按示例数据库 `chat` 和账号 `chat` 执行：
+创建 MySQL 数据库和应用账号，再导入初始表结构。命令中的 `example_db` 和 `example_user` 是示例值，执行时替换为 `config.json` 中的数据库名和账号。
 
 ```bash
-mysql -h 127.0.0.1 -u chat -p chat < backend/db/schema.sql
+mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/schema.sql
 ```
 
 `schema.sql` 创建 InnoDB 表、唯一约束和外键，不创建数据库或数据库用户。运行账号需要这些表的 SELECT、INSERT、UPDATE、DELETE 权限，导入结构时另需 CREATE、REFERENCES 权限。启动会检查账号及历史表是否就绪。
+
+用户管理入口是 `/admin`，使用独立管理密码登录。设置密码后重启服务：
+
+```bash
+python3 scripts/set-admin-password.py
+```
+
+密码以 scrypt 哈希保存在 `auth.admin_password_hash`；留空时关闭管理登录。管理会话闲置一小时过期，更换密码并重启后旧管理会话失效。页面支持按用户名、邮箱或 ID 搜索、分页、修改用户名、停用/启用账号和退出用户全部设备。停用会撤销会话并阻止登录，保留对话记录。
+
+已有数据库升级需执行一次（需 ALTER 权限）：
+
+```bash
+mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/migrations/20261114-admin.sql
+```
 
 在项目根目录构建并启动：
 
@@ -38,7 +52,7 @@ cmake --build build -j
 ./build/server
 ```
 
-打开 [http://localhost:53411](http://localhost:53411)，同一服务提供页面和接口。Enter 发送，Shift+Enter 换行，生成时发送按钮变成停止按钮。开发时也可用 `python3 -m http.server 8000 --directory frontend` 单独提供前端，在 `auth.allowed_origins` 中加入 `http://localhost:8000`，并以相同主机名访问 53411 接口。浏览器请求会携带 Cookie。
+打开 [http://localhost:53411](http://localhost:53411)，同一服务提供页面和接口。会话链接使用 `/c/16` 这样的路径，支持直接打开和刷新；旧的 `/#conversation-16` 链接会自动转换。Enter 发送，Shift+Enter 换行，生成时发送按钮变成停止按钮。开发时也可用 `python3 -m http.server 8000 --directory frontend` 单独提供前端，在 `auth.allowed_origins` 中加入 `http://localhost:8000`，并以相同主机名访问 53411 接口。浏览器请求会携带 Cookie。
 
 回复支持 Markdown 标题、嵌套列表、引用、表格、任务列表、链接、图片、删除线和代码高亮。公式使用 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 及 `math` 代码块；普通代码中的这些符号保留原样。流式回复和历史记录共用同一个渲染器。模型输出的原始 HTML 作为文字展示，生成的 HTML 经过 DOMPurify 清理。
 
@@ -48,20 +62,26 @@ cmake --build build -j
 frontend/
 ├── index.html             # 页面入口
 ├── favicon.svg
-├── src/                   # 业务源码：app.js、styles.css、markdown.js
-├── scripts/build.cjs      # Markdown 依赖打包脚本
+├── src/                   # TypeScript 源码、类型定义、styles.css 和生成的 app.js
+├── scripts/build.cjs      # TypeScript 编译和 Markdown 资源打包
 ├── vendor/                # 本地运行资源：渲染脚本、公式样式、字体和许可证
+├── tsconfig.json          # 严格类型检查
 ├── package.json
 └── package-lock.json
 ```
 
-Markdown 脚本、KaTeX 样式及字体已包含在 `frontend/vendor/`，运行无需 npm、前端构建或 CDN。只有更新渲染依赖或 `frontend/src/markdown.js` 时，才需要重新打包并提交生成的资源：
+业务源码使用 TypeScript，开启严格类型检查和数组、字典索引检查。`src/types.ts` 定义账号、设备、会话、消息及接口请求和响应，`src/dom.ts` 提供带类型的页面元素与表单访问。
+
+浏览器加载构建生成的 `frontend/src/app.js` 和 `frontend/vendor/markdown.js`。生成脚本、KaTeX 样式及字体随项目提交，部署时可直接提供这些静态资源。开发和构建需要 Node.js 22+：
 
 ```bash
 cd frontend
 npm ci
-npm run vendor
+npm run typecheck  # 只检查类型
+npm run build      # 先检查类型，再生成浏览器脚本及 vendor 资源
 ```
+
+修改 `frontend/src/*.ts` 后运行 `npm run build`，将源码和生成资源一起提交。`src/app.js` 是生成文件，请编辑 `src/app.ts`；原来的 `npm run vendor` 命令保留为完整构建的别名。
 
 依赖版本固定在 `frontend/package-lock.json`，许可证保存在 `frontend/vendor/THIRD-PARTY-NOTICES.txt`。
 
@@ -83,9 +103,9 @@ npm run vendor
   "mysql": {
     "host": "127.0.0.1",
     "port": 3306,
-    "database": "chat",
-    "username": "",
-    "password": "",
+    "database": "example_db",
+    "username": "example_user",
+    "password": "replace-with-your-mysql-password",
     "pool_size": 8,
     "acquire_timeout_ms": 1000,
     "connect_timeout_seconds": 5,
@@ -103,24 +123,24 @@ npm run vendor
     "io_timeout_ms": 3000
   },
   "auth": {
+    "admin_password_hash": "",
     "registration_enabled": true,
-    "min_password_length": 15,
+    "min_password_length": 8,
     "max_password_length": 128,
-    "key_namespace": "auth:account",
+    "key_namespace": "example:auth:account",
     "login_attempts": 10,
     "login_window_seconds": 300,
     "operation_attempts": 20,
     "operation_window_seconds": 60,
     "password_verification_seconds": 300,
-    "session_namespace": "auth:session",
+    "session_namespace": "example:auth:session",
     "session_idle_seconds": 86400,
-    "session_absolute_seconds": 604800,
-    "cookie_name": "chat_session",
-    "secure_cookie": false,
+    "cookie_name": "example_chat_session",
+    "secure_cookie": true,
     "allowed_origins": []
   },
   "email": {
-    "key_namespace": "auth:email",
+    "key_namespace": "example:auth:email",
     "code_timeout_seconds": 600,
     "resend_interval_seconds": 60,
     "max_code_attempts": 5,
@@ -131,7 +151,7 @@ npm run vendor
       "username": "",
       "password": "",
       "from_address": "",
-      "from_name": "Chat",
+      "from_name": "",
       "ca_file": "",
       "timeout_ms": 10000
     }
@@ -153,9 +173,9 @@ MySQL 语句通过 SOCI `use()` 绑定参数；其 MySQL 后端采用客户端�
 
 账号设置首页按功能提供入口，修改密码和邮箱在独立页面操作。邮箱设置先验证当前密码，通过后再显示绑定、更换与解绑；验证仅对当前登录会话有效，默认 300 秒，可通过 `auth.password_verification_seconds` 调整（1–3600 秒），过期后重新验证。“已登录设备”显示浏览器、系统、登录及最近活动时间，可单独退出某台设备，也可退出当前设备或全部设备。
 
-`auth` 配置注册开关、密码长度、Cookie、共享限流和会话时长。登录限流按规范化后的登录标识计数，同一窗口还限制全局尝试总数为 `login_attempts × 100`。默认连续 86400 秒未使用或登录累计 604800 秒后失效；所有实例使用相同 namespace 和时长。账号密码用带随机盐的 scrypt 存储，参数为 N=32768、r=8、p=3，参见 [OWASP 密码存储参数](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。登录和凭据变更锁定同一账号行，密码变更先撤销 Redis 会话再提交 MySQL；提交失败时可能需要重新登录，提交结果未知时由用户查询确认。
+`auth` 配置注册开关、密码长度、Cookie、共享限流和会话时长。登录限流按规范化后的登录标识计数，同一窗口还限制全局尝试总数为 `login_attempts × 100`。默认连续 86400 秒未使用后失效；有效请求同时续期 Redis 会话和浏览器 Cookie，持续使用没有固定的累计登录期限；所有实例使用相同 namespace 和时长。账号密码用带随机盐的 scrypt 存储，参数为 N=32768、r=8、p=3，参见 [OWASP 密码存储参数](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。登录和凭据变更锁定同一账号行，密码变更先撤销 Redis 会话再提交 MySQL；提交失败时可能需要重新登录，提交结果未知时由用户查询确认。
 
-示例 `auth.secure_cookie=false` 用于本机 HTTP 调试；HTTPS 部署设为 `true`。允许来源填写完整的来源（协议、主机、可选端口），不含路径或通配符，默认只允许同源。Cookie 使用 HttpOnly、SameSite=Lax；前端不保存密码、会话凭据或聊天内容到 localStorage。原有匿名本地历史保留在浏览器，不自动迁入任何账号。
+示例中的 `auth.secure_cookie` 为 `true`，通过 HTTP 调试时改为 `false`。允许来源填写完整的来源（协议、主机、可选端口），不含路径或通配符，默认只允许同源。Cookie 使用 HttpOnly、SameSite=Lax；前端不保存密码、会话凭据或聊天内容到 localStorage。原有匿名本地历史保留在浏览器，不自动迁入任何账号。
 
 `email.smtp.host` 留空时邮箱功能不可用，用户名注册和登录仍可使用。配置现有邮箱 SMTP 时填写主机、端口、`security`（`tls` 或 `starttls`）、用户名、发件邮箱及 `password` 中的 SMTP 授权码。`ca_file` 留空使用系统证书；不会关闭证书验证。验证码默认 600 秒有效，60 秒后可重发，最多尝试 5 次。
 
@@ -179,53 +199,191 @@ make proactor
 
 Ctrl+C 或 SIGTERM 停止服务，运行中的模型调用会取消，工作线程随后退出。
 
-## Docker Compose
+## 部署包目录
 
-从 `config.json.example` 复制出 `config.json`，填写 `mysql.password`、`docker.mysql_root_password`、`models[].api_key` 和 `email.smtp.password`。MySQL 应用账号和 root 使用不同密码。
-
-Docker 配置使用 `mysql.host=mysql`、`mysql.username=chat`、`mysql.database=chat`，以及 `redis.host=redis`。服务监听地址为 `0.0.0.0:53411`。
-
-通过 Python 3 入口启动；脚本从 `config.json` 读取 MySQL 初始化密码并调用 Compose：
+上传整个项目后，可在任意目录使用 [systemd 部署脚本](deploy/README.md)：
 
 ```bash
-python3 docker/compose.py up -d --build --wait
+cd /实际上传路径/chat/deploy
+bash install-systemd.sh --install-deps
 ```
 
-打开 [http://localhost:53411](http://localhost:53411)。四个服务通过 Compose 网络连接：
+脚本在服务器编译后端，安装并启动 `chat.service`，设置开机启动及退出后重启。MySQL、Redis 和数据库表需提前准备，项目根目录的 `config.json` 填写实际连接信息。
+
+`deploy/` 也保留 Docker 和二进制部署包：
 
 ```text
-浏览器 → Nginx（宿主机 53411）→ Chat（容器 53411）
-                               ├→ MySQL（mysql:3306）
-                               └→ Redis（redis:6379）
+deploy/
+├── install-systemd.sh
+├── README.md
+├── docker/
+│   └── chat-deploy.tar.gz
+└── binary/
+    └── chat-binary.tar.gz
 ```
 
-Nginx 代理页面及 API，保留原始 Host，并关闭响应缓冲以转发 SSE。只有 Nginx 发布宿主机端口。MySQL、Redis 健康检查通过后启动 Chat，Chat 就绪后启动 Nginx。四个容器配置为随 Docker 重启，手动停止后保持停止。
+两种方式都部署到目标服务器的 `~/chat/`，使用已有的 MySQL、Redis 和 Nginx。
 
-MySQL 首次启动时自动创建 `chat` 数据库与账号，执行 `backend/db/schema.sql`，再将应用账号权限收敛为 SELECT、INSERT、UPDATE、DELETE。MySQL 数据和 Redis AOF 分别保存在 `mysql_data`、`redis_data` 命名卷中。已有卷不会重新执行初始化 SQL；修改 `config.json` 密码也不会自动修改卷内的数据库密码。
+## Docker Compose
 
-常用命令：
+目标服务器已有 apt 安装的 MySQL、Redis、Nginx，Docker 只运行 chat。应用使用 Linux 的 `host` 网络模式，直接连接本机服务，地址和端口与二进制部署相同。
+
+### 打包并上传
+
+在本机项目根目录执行：
 
 ```bash
-python3 docker/compose.py ps
-python3 docker/compose.py logs -f chat
-python3 docker/compose.py restart chat
-python3 docker/compose.py down
+mkdir -p deploy/docker
+docker compose build server
+docker save -o deploy/docker/chat-images.tar server:latest
+tar -czf deploy/docker/chat-deploy.tar.gz \
+  compose.yaml config.json.example nginx.conf.example \
+  backend/db/schema.sql backend/db/migrations scripts/set-admin-password.py README.md \
+  -C deploy/docker chat-images.tar
+rm deploy/docker/chat-images.tar
+ssh 用户名@服务器IP 'mkdir -p ~/chat'
+scp deploy/docker/chat-deploy.tar.gz 用户名@服务器IP:~/chat/
 ```
 
-`down` 保留数据库与 Redis 数据。需要清空全部账号、历史、会话并重新初始化时：
+`deploy/docker/` 的包内含应用镜像、Compose、配置模板和初始表结构。Dockerfile、C++ 源码留在本机。本机和目标机器使用相同 CPU 架构；目标机器安装 Docker Engine 和 Compose 插件。
+
+### 首次部署
+
+登录目标机器，始终在 `~/chat/` 操作：
 
 ```bash
-python3 docker/compose.py down -v
-python3 docker/compose.py up -d --build --wait
+cd ~/chat
+tar -xzf chat-deploy.tar.gz
+docker load -i chat-images.tar
+cp -n config.json.example config.json
+nano config.json
 ```
 
-从 apt 服务迁移且确认容器运行正常后，在项目根目录执行以下脚本，卸载宿主机的 MySQL、Redis，并删除其旧数据目录：
+在 `config.json` 中填写实际的模型服务商、模型名、API 地址和 API Key，以及 MySQL、Redis 的连接信息。本机服务默认地址为 `127.0.0.1:3306` 和 `127.0.0.1:6379`。旧配置中的 `mysql`、`redis` 容器主机名改为 `127.0.0.1`，其余账号、密码和 namespace 沿用原值。
+
+应用以 UID 10001 运行，`config.json` 需允许该用户读取。应用的监听地址和端口由配置中的 `server.host`、`server.port` 决定，默认 `0.0.0.0:53411`。
+
+### 准备应用数据库
+
+已有应用数据库和表结构时，直接使用原账号配置。首次建库，在 `~/chat/` 执行：
 
 ```bash
-sudo bash docker/remove-host-services.sh
+sudo mysql
 ```
 
-应用镜像使用 `Dockerfile` 分阶段构建，包含程序、前端资源和动态库，以 UID 10001 的 `chat` 用户运行；`config.json` 只读挂载，文件需允许该用户读取。Docker 镜像固定构建 Reactor，并行数默认 2，可通过 `python3 docker/compose.py build --build-arg BUILD_JOBS=4 chat` 调整。
+在 MySQL 提示符下执行。将数据库名 `example_db`、账号 `example_user` 和密码占位值替换为 `config.json` 中的对应值。
+
+```sql
+CREATE DATABASE IF NOT EXISTS example_db CHARACTER SET utf8mb4;
+CREATE USER IF NOT EXISTS 'example_user'@'127.0.0.1' IDENTIFIED BY 'replace-with-your-mysql-password';
+USE example_db;
+SOURCE backend/db/schema.sql;
+GRANT SELECT, INSERT, UPDATE, DELETE ON example_db.* TO 'example_user'@'127.0.0.1';
+exit
+```
+
+### 域名与 Nginx
+
+准备本项目的站点配置：
+
+```bash
+cd ~/chat
+cp -n nginx.conf.example nginx.conf
+nano nginx.conf
+```
+
+将 `server_name` 改成自己的域名，`proxy_pass` 使用 `http://127.0.0.1:53411`。域名 A/AAAA 记录指向服务器的对应公网地址，放行 TCP 80。安装站点并重载 apt 安装的 Nginx：
+
+```bash
+sudo cp nginx.conf /etc/nginx/conf.d/chat.conf
+sudo systemctl reload nginx
+```
+
+其他项目继续使用各自的 server 块。HTTPS 在该站点中配置证书路径；使用 HTTPS 后将 `config.json` 中的 `auth.secure_cookie` 设为 `true`。同源部署的 `auth.allowed_origins` 可保持 `[]`。
+
+### 启动应用
+
+在 `~/chat/` 执行：
+
+```bash
+docker compose up -d --no-build --pull never
+```
+
+通过 `http://你的域名` 访问。Nginx、MySQL、Redis 继续由系统管理，应用通过本机地址连接它们。
+
+从源码在本机运行 Docker 时，同样先准备 `config.json` 和服务，再执行 `docker compose up -d --build`。镜像包含前端和 Reactor 后端，目标机器运行无需编译器、npm 或 Python。
+
+### 更新已有部署
+
+新包仍上传到目标机器的 `~/chat/`，然后执行：
+
+```bash
+cd ~/chat
+tar -xzf chat-deploy.tar.gz
+docker load -i chat-images.tar
+docker compose up -d --no-build --pull never
+```
+
+更新只替换有变化的应用容器。包内只带配置模板，解压保留已有 `config.json`、`nginx.conf` 和 `compose.override.yaml`。旧版本的 `compose.override.yaml` 若包含 nginx/mysql/redis 服务，移除这些条目，应用 Compose 只保留 server。
+
+只修改 `config.json` 时，用 `docker compose up -d --no-build --force-recreate server` 重新挂载并启动应用。修改域名或证书后，将站点配置复制到 `/etc/nginx/conf.d/chat.conf`，再执行 `sudo systemctl reload nginx`。表结构升级按对应版本执行迁移 SQL。
+
+查看日志或停止应用：
+
+```bash
+docker compose logs -f server
+docker compose down
+```
+
+## 二进制部署
+
+### 打包并上传
+
+在与目标服务器 CPU 架构、发行版版本相同的 Linux 环境中编译。在项目根目录执行：
+
+```bash
+cmake -S . -B build-binary -DCMAKE_BUILD_TYPE=Release -DNET_BACKEND=reactor
+cmake --build build-binary --target server -j
+mkdir -p deploy/binary
+tar --exclude=frontend/node_modules -czf deploy/binary/chat-binary.tar.gz \
+  frontend config.json.example nginx.conf.example backend/db/schema.sql \
+  backend/db/migrations scripts/set-admin-password.py README.md \
+  -C build-binary server
+ssh 用户名@服务器IP 'mkdir -p ~/chat'
+scp deploy/binary/chat-binary.tar.gz 用户名@服务器IP:~/chat/
+```
+
+包内包含 `server`、前端资源、配置模板、初始表结构和说明文档。目标服务器需要 libcurl、OpenSSL、MySQL Client、libstdc++ 运行库及 CA 证书；运行时无需编译器或 npm。Reactor 版本不依赖 liburing。
+
+### 首次部署
+
+在目标服务器执行：
+
+```bash
+cd ~/chat
+tar -xzf chat-binary.tar.gz
+cp -n config.json.example config.json
+chmod 600 config.json
+nano config.json
+ldd ./server
+./server
+```
+
+填写 MySQL、Redis 和模型连接信息，安装 `ldd` 输出中标记为 `not found` 的运行库后启动。首次建库及域名配置使用上文的“准备应用数据库”和“域名与 Nginx”步骤。
+
+必须从 `~/chat/` 启动，程序从当前工作目录读取 `config.json` 和 `frontend/`。默认访问 `http://服务器IP:53411`，Ctrl+C 或 SIGTERM 停止程序。使用进程管理器时，将工作目录设为 `~/chat/` 对应的绝对路径。
+
+### 更新已有部署
+
+将新包上传到 `~/chat/`，停止正在运行的程序，再执行：
+
+```bash
+cd ~/chat
+tar -xzf chat-binary.tar.gz
+./server
+```
+
+包内仅提供配置模板，更新保留已有 `config.json` 和 `nginx.conf`。表结构升级按对应版本执行迁移 SQL。
 
 ## 模型配置
 
@@ -237,16 +395,16 @@ sudo bash docker/remove-host-services.sh
 | `openai-responses` | 追加 `/responses` |
 | `anthropic-messages` | 追加 `/messages` |
 
-`base_url` 必须包含需要的 API 前缀，例如 `/v1`，但不包含上述资源路径。文件里的默认项是 DeepSeek Chat Completions；可添加自己的服务商与模型。启动时加载配置，修改后需重启。
+`base_url` 填写服务商提供的 API 根地址，包含所需前缀（如 `/v1`），由后端追加表中的路径。下面和 `config.json.example` 中的 `example-provider`、`example-model`、`api.example.invalid` 都是示例值。在本地 `config.json` 填写实际的服务商标识、模型名、API 地址和密钥，并按服务商支持的协议选择 `api`。修改配置后重启服务。
 
 ```json
 [
   {
-    "provider": "deepseek",
+    "provider": "example-provider",
     "api": "openai-completions",
-    "base_url": "https://api.deepseek.com",
-    "api_key": "replace-with-a-model-api-key",
-    "model": "deepseek-flash",
+    "base_url": "https://api.example.invalid/v1",
+    "api_key": "replace-with-your-model-api-key",
+    "model": "example-model",
     "max_output_tokens": 4096,
     "temperature": null,
     "top_p": null,
@@ -267,20 +425,22 @@ sudo bash docker/remove-host-services.sh
 
 `GET /api/models` 只返回已配置模型的 `provider`、`model`，不包含地址、密钥或生成参数。
 
-先登录，再通过 `POST /api/conversations` 创建会话。聊天只提交本次问题与服务端会话 ID，上下文由后端按归属读取：
+先登录，再通过 `POST /api/conversations` 创建会话。发送聊天时，从 `GET /api/models` 取得实际的 `provider` 和 `model`，用来替换下面请求中的占位值。上下文由后端按会话归属读取。
 
 ```json
 {
   "conversation_id": "1",
   "request_id": "question-1",
-  "provider": "deepseek",
-  "model": "deepseek-flash",
+  "provider": "example-provider",
+  "model": "example-model",
   "stream": true,
   "content": "解释一下 SSE"
 }
 ```
 
 完整账号、历史、分页、重试和错误约定见 [接口文档](docs/api.md)。POST 需携带 `Content-Type: application/json`、`X-Chat-Request: 1` 和登录 Cookie。
+
+环境准备、接口冒烟命令、功能用例与故障验收见 [测试文档](docs/testing.md)。
 
 - `stream` 默认 true。SSE 使用 `meta` 返回持久化消息 ID，`delta` / `reasoning_delta` 分开发送正文与思考，最终回复提交 MySQL 成功后发送 `done`；上游异常或保存失败使用 `error` 结束。普通响应包含 reply、reasoning、finish_reason 和消息 ID。
 - 停止生成会取消上游调用并保存已收到的正文与思考，已成功提交的历史在重启后保留；重新生成成功前仍展示原回答。
@@ -301,11 +461,11 @@ sudo bash docker/remove-host-services.sh
 - `backend/ai/src/SseParser.hpp/.cc`：增量 SSE 拆包，只处理格式，不解释模型 JSON。
 - `backend/ai/ModelManager.hpp`、`backend/ai/src/ModelManager.cc`：配置校验、密钥加载及客户端查找。
 - `backend/ServerConfig.hpp/.cc`：读取 `config.json`，校验端口、IO/worker 线程数和 MySQL/Redis 连接配置。
-- `backend/chat/Chat.hpp/.cc`：组装账号、会话、历史、数据库、HTTP 与模型服务，并管理独立的有界业务/模型线程池。
-- `backend/auth/`：Account、Session、Email 的独立接口与 `src/` 实现，核心不依赖 HTTP 或聊天。
+- `backend/core/Chat.hpp/.cc`：组装账号、会话、历史、数据库、HTTP 与模型服务，并管理独立的有界业务/模型线程池。
+- `backend/auth/Auth.hpp`：账号、会话和验证的统一接口；`Config.hpp` 汇总配置。`src/` 内部按账号、会话、验证码分文件，`Mailer` 仅负责 SMTP 投递。核心不依赖 HTTP 或聊天。
 - `backend/db/`：SOCI MySQL 参数绑定与事务、redis-plus-plus 命令和有界连接池；`schema.sql` 为初始结构。
 - `backend/history/`：归属检查、游标分页、分支上下文、幂等回合与有序快照保存。
-- `backend/chat/src/`：账号/历史路由、Cookie、CSRF、CORS 和生成调度。
+- `backend/core/src/`：`ApiHandler` 统一账号与聊天接口的来源/CSRF 检查、业务入队、按路由策略鉴权和错误转换；各路由负责参数、Cookie、响应与生成调度。
 - `backend/http/Http.hpp`、`backend/http/src/Http.cc`：通用 HTTP 服务和连接生命周期，解析请求后调用业务 handler，不依赖 AI。
 - `backend/http/HttpRequest.hpp`：公共请求数据，包含 method、path、headers 和 body。
 - `backend/http/HttpRouter.hpp`、`backend/http/src/HttpRouter.cc`：按 method/path 分发到业务 handler。
@@ -314,6 +474,8 @@ sudo bash docker/remove-host-services.sh
 - `backend/net/Net.hpp`：公共头文件汇总；也可按需包含根目录的 `EventLoop.hpp`、`TcpConnection.hpp`、`TcpServer.hpp`、`Buffer.hpp`、`TimerQueue.hpp`、`InetAddress.hpp` 和 `Runtime.hpp`，直接查看方法及使用约束。后端选择和实现位于 `src/`，公共类声明不随后端变化。
 - `frontend/`：页面、样式和浏览器会话管理，无构建步骤或 CDN 依赖。
 
+登录模块的职责、调用图和改造前后对比见 [认证架构](docs/auth-architecture.md)。
+
 网络运行时按图中的公共层与两套实现组织：
 
 ```text
@@ -321,11 +483,11 @@ backend/
 ├── main.cc
 ├── nlohmann/
 │   └── json.hpp                # JSON 单头文件
-├── auth/                       # 账号、Redis Session、验证码与 SMTP
+├── auth/                       # 统一 Auth 接口，内部实现会话、验证码和邮件投递
 ├── db/                         # 连接池、SOCI 参数绑定、事务与初始 SQL
 ├── history/                    # 服务端聊天历史与分支
 ├── common/                     # 随机数、摘要与共享 curl 生命周期
-├── chat/                       # 网页路由与服务组合
+├── core/                       # 网页路由与服务组合
 ├── http/                       # 通用 HTTP、路由和 SSE 响应
 │   ├── Http.hpp                # 公共：服务和 handler
 │   ├── HttpRequest.hpp         # 公共：请求数据

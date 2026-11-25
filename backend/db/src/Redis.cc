@@ -43,7 +43,7 @@ struct Redis::Impl
   static sw::redis::ConnectionPoolOptions PoolOptions(const RedisConfig &config)
   {
     if (!config.pool_size || config.acquire_timeout.count() <= 0)
-      throw std::invalid_argument("无效的 Redis 连接池配置");
+      throw std::invalid_argument("Invalid Redis connection pool configuration");
     sw::redis::ConnectionPoolOptions options;
     options.size = config.pool_size;
     options.wait_timeout = config.acquire_timeout;

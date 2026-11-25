@@ -14,11 +14,11 @@ void InitThread()
 {
   static std::once_flag initialized;
   std::call_once(initialized, [] {
-    if (mysql_library_init(0, nullptr, nullptr)) throw std::runtime_error("初始化 MySQL 客户端失败");
+    if (mysql_library_init(0, nullptr, nullptr)) throw std::runtime_error("Failed to initialize the MySQL client");
   });
   struct Thread
   {
-    Thread() { if (mysql_thread_init()) throw std::runtime_error("初始化 MySQL 线程失败"); }
+    Thread() { if (mysql_thread_init()) throw std::runtime_error("Failed to initialize the MySQL thread"); }
     ~Thread() { mysql_thread_end(); }
   };
   thread_local Thread thread;
@@ -37,7 +37,7 @@ std::string QuoteOption(const std::string &value)
   std::string quoted = "'";
   for (char c : value)
   {
-    if (c == '\0') throw std::invalid_argument("MySQL 连接配置不能包含 NUL");
+    if (c == '\0') throw std::invalid_argument("MySQL connection configuration must not contain NUL");
     if (c == '\'' || c == '\\') quoted += '\\';
     quoted += c;
   }

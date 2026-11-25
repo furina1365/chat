@@ -2,12 +2,11 @@
 
 #include "db/MySql.hpp"
 #include "db/Redis.hpp"
-#include "auth/Account.hpp"
-#include "auth/Email.hpp"
-#include "auth/Session.hpp"
+#include "auth/Config.hpp"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct ServerConfig
 {
@@ -20,10 +19,8 @@ struct ServerConfig
   int model_queue_size = 8;
   db::MySqlConfig mysql;
   db::RedisConfig redis;
-  auth::AccountConfig account;
-  auth::SessionConfig session;
-  auth::EmailConfig email;
-  std::string cookie_name = "chat_session";
+  auth::Config auth;
+  std::string cookie_name = "session";
   bool secure_cookie = true;
   std::vector<std::string> allowed_origins;
 };

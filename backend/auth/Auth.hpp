@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Types.hpp"
+#include "Config.hpp"
 
 #include <cstddef>
 #include <chrono>
@@ -16,32 +17,15 @@ namespace db
 
 namespace auth
 {
-  class Session;
-  class Email;
-
-  struct AccountConfig
-  {
-    bool registration_enabled = true;
-    std::size_t min_password_length = 15;
-    std::size_t max_password_length = 128;
-    std::string key_namespace = "auth:account";
-    std::size_t login_attempts = 10;
-    std::chrono::seconds login_window{300};
-    std::size_t operation_attempts = 20;
-    std::chrono::seconds operation_window{60};
-    std::chrono::seconds password_verification_timeout{300};
-  };
-
-  // 依赖对象须比 Account 活得更久。同步接口可并发调用，应在业务 worker 执行。
-  // Redis 用于账号操作限流和短时密码验证；登录会话统一调用 Session。
-  class Account
+  // 依赖对象须比 Auth 活得更久。同步接口可并发调用，应在业务 worker 执行。
+  // 统一管理账号、Redis 会话、验证码、限流和短时密码验证。
+  class Auth
   {
   public:
-    Account(db::MySql &mysql, db::Redis &redis, Session &sessions, Email &email,
-            const AccountConfig &config = {});
-    ~Account();
-    Account(const Account &) = delete;
-    Account &operator=(const Account &) = delete;
+    Auth(db::MySql &mysql, db::Redis &redis, const Config &config = {});
+    ~Auth();
+    Auth(const Auth &) = delete;
+    Auth &operator=(const Auth &) = delete;
 
     // 邮件失败不撤销已创建账号，通过 Registration.email_delivery 表达结果。
     Result<Registration> Register(const std::string &username, const std::string &password,
@@ -49,13 +33,22 @@ namespace auth
     Result<LoginResult> Login(const std::string &identifier, const std::string &password,
                               const std::string &user_agent = {});
 
-    // 受保护操作的身份均来自 Session::Authenticate。
+    // 校验会话并原子续期；受保护操作的身份均来自此接口。
+    Result<AuthContext> Authenticate(const std::string &token, const std::string &user_agent = {});
     Result<User> Get(const AuthContext &context);
+    Result<SessionTicket> LoginAdmin(const std::string &password);
+    Result<AuthContext> AuthenticateAdmin(const std::string &token);
+    Status LogoutAdmin(const AuthContext &context);
+    Result<UserPage> ListUsers(const AuthContext &context, const std::string &search = {}, UserId before_id = 0);
+    Result<User> UpdateUser(const AuthContext &context, UserId id, const std::optional<std::string> &username,
+                            std::optional<bool> disabled);
+    Status RevokeUserSessions(const AuthContext &context, UserId id);
     Status Logout(const AuthContext &context);
     // 撤销该账号全部设备的会话，包括当前设备。
     Status LogoutAll(const AuthContext &context);
     Result<SessionPage> ListSessions(const AuthContext &context, const std::string &cursor = "0");
     Status LogoutDevice(const AuthContext &context, const SessionId &id);
+    Result<User> ChangeUsername(const AuthContext &context, const std::string &username);
     Status ChangePassword(const AuthContext &context, const std::string &old_password,
                           const std::string &new_password);
     // 验证记录仅授权当前会话的邮箱管理，返回有效时长。

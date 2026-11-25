@@ -4,7 +4,6 @@
 #include "history/History.hpp"
 #include "http/HttpRouter.hpp"
 #include <iostream>
-#include <future>
 
 namespace chat
 {
@@ -91,7 +90,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   {
     if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", error->message}}.dump(), true);
     else detail::HistoryError(response, *error);
-    std::cerr << "回复最终保存失败\n";
+    std::cerr << "Failed to save the final reply\n";
     return;
   }
   if (completion.state != history::MessageState::Completed)
@@ -113,12 +112,12 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   }
 }
 }
-void RegisterChatRoutes(HttpRouter &router, auth::Session &sessions, history::History &history,
+void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &history,
                         const ai::ModelManager &models, SubmitTask business_tasks, SubmitTask model_tasks,
                         const AuthHttpConfig &config)
 {
   auto route = [&](const char *method, const char *path, AuthenticatedHandler handler) {
-    router.Add(method, path, RequireSession(sessions, business_tasks, config, std::move(handler)));
+    router.Add(method, path, ApiHandler(auth, business_tasks, config, Access::Authenticated, std::move(handler)));
   };
   route("GET", "/api/models", [&models](const auto &, const auto &, const auto &response) {
     Json items = Json::array();
@@ -144,11 +143,13 @@ void RegisterChatRoutes(HttpRouter &router, auth::Session &sessions, history::Hi
   });
   route("GET", "/api/conversation", [&history](const auto &context, const auto &request, const auto &response) {
     auto query = detail::Query(request, {"id"});
-    auto conversation = detail::HistoryTake(history.Get(context.user_id, detail::Id(query, "id")));
-    Json messages = Json::array();
-    if (conversation.current_message_id)
-      for (const auto &message : detail::HistoryTake(history.Context(context.user_id, conversation.id, *conversation.current_message_id, 500))) messages.push_back(detail::Message(message));
-    response->Reply("200 OK", Json{{"conversation", detail::Conversation(conversation)}, {"messages", messages}}.dump());
+    auto view = detail::HistoryTake(history.GetView(context.user_id, detail::Id(query, "id")));
+    response->Reply("200 OK", detail::ConversationView(view).dump());
+  });
+  route("POST", "/api/conversation/select", [&history](const auto &context, const auto &request, const auto &response) {
+    auto body = detail::Body(request, {"conversation_id", "message_id"});
+    auto view = detail::HistoryTake(history.SelectReply(context.user_id, detail::Id(body, "conversation_id"), detail::Id(body, "message_id")));
+    response->Reply("200 OK", detail::ConversationView(view).dump());
   });
   route("POST", "/api/conversation/rename", [&history](const auto &context, const auto &request, const auto &response) {
     auto body = detail::Body(request, {"conversation_id", "title"});
@@ -235,14 +236,12 @@ void RegisterChatRoutes(HttpRouter &router, auth::Session &sessions, history::Hi
         if (bytes > 240 * 1024) throw history::Error{history::ErrorCode::InvalidRequest, "对话过长，请新建对话。"};
         request.messages.push_back({message.role == history::Role::User ? ai::Role::User : ai::Role::Assistant, message.content});
       }
-      auto ready = std::make_shared<std::promise<void>>();
-      auto admitted = ready->get_future().share();
-      if (!model_tasks([&history, user = context.user_id, conversation, turn, client, request, stream, response, admitted] {
-        admitted.get();
-        Generate(history, user, conversation, turn, client, request, stream, response);
+      if (!model_tasks([&history, user = context.user_id, conversation, turn, client, request, stream, response] {
+        detail::Safely(response, [&] {
+          if (stream) response->StartStream();
+          Generate(history, user, conversation, turn, client, request, stream, response);
+        });
       })) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
-      if (stream) response->StartStream();
-      ready->set_value();
     }
     catch (...)
     {

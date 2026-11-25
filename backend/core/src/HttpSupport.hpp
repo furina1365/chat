@@ -1,5 +1,5 @@
 #pragma once
-#include "AuthRoutes.hpp"
+#include "Api.hpp"
 #include "auth/Types.hpp"
 #include "history/Types.hpp"
 #include <nlohmann/json.hpp>
@@ -8,6 +8,12 @@
 
 namespace chat::detail
 {
+inline void Cookie(const std::shared_ptr<HttpResponse> &response, const AuthHttpConfig &config,
+                   const std::string &token, std::int64_t seconds)
+{
+  response->SetHeader("Set-Cookie", config.cookie_name + "=" + token + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" +
+                      std::to_string(std::max<std::int64_t>(0, seconds)) + (config.secure_cookie ? "; Secure" : ""));
+}
 using Json = nlohmann::json;
 inline void ReplyError(const std::shared_ptr<HttpResponse> &response, const std::string &status,
                        const std::string &code, const std::string &message)
@@ -20,6 +26,7 @@ inline void AuthError(const std::shared_ptr<HttpResponse> &response, const auth:
   {
     case C::InvalidRequest: status = "400 Bad Request"; code = "invalid_request"; break;
     case C::Unauthenticated: status = "401 Unauthorized"; code = "unauthenticated"; break;
+    case C::Forbidden: status = "403 Forbidden"; code = "forbidden"; break;
     case C::InvalidCredentials: status = "401 Unauthorized"; code = "invalid_credentials"; break;
     case C::ReauthenticationRequired: status = "403 Forbidden"; code = "reauthentication_required"; break;
     case C::InvalidCode: status = "400 Bad Request"; code = "invalid_code"; break;
@@ -114,11 +121,22 @@ inline Json Conversation(const history::Conversation &value)
 inline Json Message(const history::Message &value)
 {
   auto state = value.state == history::MessageState::Completed ? "completed" : value.state == history::MessageState::Interrupted ? "interrupted" : value.state == history::MessageState::Failed ? "failed" : "generating";
-  return {{"id", std::to_string(value.id)}, {"role", value.role == history::Role::User ? "user" : "assistant"},
+  Json result = {{"id", std::to_string(value.id)}, {"role", value.role == history::Role::User ? "user" : "assistant"},
           {"parent_id", value.parent_id ? Json(std::to_string(*value.parent_id)) : Json(nullptr)},
           {"state", state}, {"content", value.content}, {"reasoning", value.reasoning}, {"finish_reason", value.finish_reason},
           {"error", value.error}, {"interrupted", value.state != history::MessageState::Completed},
           {"truncated", value.finish_reason == "length"}};
+  if (value.versions)
+    result["versions"] = {{"index", value.versions->index}, {"total", value.versions->total},
+        {"previous_id", value.versions->previous_id ? Json(std::to_string(*value.versions->previous_id)) : Json(nullptr)},
+        {"next_id", value.versions->next_id ? Json(std::to_string(*value.versions->next_id)) : Json(nullptr)}};
+  return result;
+}
+inline Json ConversationView(const history::ConversationView &view)
+{
+  Json messages = Json::array();
+  for (const auto &message : view.messages) messages.push_back(Message(message));
+  return {{"conversation", Conversation(view.conversation)}, {"messages", messages}};
 }
 inline bool Prepare(const HttpRequest &request, const std::shared_ptr<HttpResponse> &response, const AuthHttpConfig &config)
 {
@@ -130,7 +148,10 @@ inline bool Prepare(const HttpRequest &request, const std::shared_ptr<HttpRespon
     auto expected = std::string(config.secure_cookie ? "https://" : "http://") + host;
     if (!origin.empty())
     {
-      if (origin != expected && std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) == config.allowed_origins.end())
+      // 浏览器的同源判断基于外部 URL，不受反向代理改写 Host 或终止 TLS 影响。
+      // Sec- 请求头由浏览器控制；其他来源及旧客户端继续校验 Origin。
+      auto same_origin = Header(request, "sec-fetch-site") == "same-origin";
+      if (!same_origin && origin != expected && std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) == config.allowed_origins.end())
       { ReplyError(response, "403 Forbidden", "origin_rejected", "请求来源未获允许。"); return false; }
       response->SetHeader("Access-Control-Allow-Origin", origin);
       response->SetHeader("Access-Control-Allow-Credentials", "true");
@@ -147,14 +168,17 @@ inline bool Prepare(const HttpRequest &request, const std::shared_ptr<HttpRespon
     { ReplyError(response, "403 Forbidden", "csrf_rejected", "请求缺少安全校验信息。"); return false; }
     return true;
   }
-  catch (...) { ReplyError(response, "400 Bad Request", "invalid_request", "请求头无效。"); return false; }
+  catch (const std::invalid_argument &) { ReplyError(response, "400 Bad Request", "invalid_request", "请求头无效。"); return false; }
 }
 template<class F> void Safely(const std::shared_ptr<HttpResponse> &response, F action)
 {
   try { action(); }
   catch (const auth::Error &error) { AuthError(response, error); }
   catch (const history::Error &error) { HistoryError(response, error); }
-  catch (...) { ReplyError(response, "400 Bad Request", "invalid_request", "请求参数无效。"); }
+  catch (const Json::exception &) { ReplyError(response, "400 Bad Request", "invalid_request", "请求参数无效。"); }
+  catch (const std::invalid_argument &) { ReplyError(response, "400 Bad Request", "invalid_request", "请求参数无效。"); }
+  catch (const std::out_of_range &) { ReplyError(response, "400 Bad Request", "invalid_request", "请求参数无效。"); }
+  catch (...) { ReplyError(response, "500 Internal Server Error", "internal", "处理请求失败，请稍后重试。"); }
 }
 template<class T> T Take(auth::Result<T> result)
 {

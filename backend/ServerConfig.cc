@@ -17,10 +17,10 @@ void CheckFields(const Json &object, const std::string &name,
                  std::initializer_list<const char *> fields)
 {
   if (!object.is_object())
-    throw std::runtime_error(name + " 必须是 JSON 对象");
+    throw std::runtime_error(name + " must be a JSON object");
   for (const auto &entry : object.items())
     if (std::find(fields.begin(), fields.end(), entry.key()) == fields.end())
-      throw std::runtime_error("未知配置项：" +
+      throw std::runtime_error("Unknown configuration field: " +
                                (name.empty() ? entry.key() : name + "." + entry.key()));
 }
 
@@ -31,8 +31,8 @@ int ReadNumber(const Json &object, const char *key, int fallback, int minimum,
     return fallback;
   const auto &value = object.at(key);
   if (!value.is_number_integer() || value < minimum || value > maximum)
-    throw std::runtime_error(prefix + key + " 必须是 " + std::to_string(minimum) +
-                             " 到 " + std::to_string(maximum) + " 之间的整数");
+    throw std::runtime_error(prefix + key + " must be an integer between " + std::to_string(minimum) +
+                             " and " + std::to_string(maximum));
   return value.get<int>();
 }
 
@@ -43,14 +43,14 @@ std::string ReadString(const Json &object, const char *key, const std::string &f
     return fallback;
   const auto &value = object.at(key);
   if (!value.is_string() || (!allow_empty && value.get_ref<const std::string &>().empty()))
-    throw std::runtime_error(prefix + key + (allow_empty ? " 必须是字符串" : " 必须是非空字符串"));
+    throw std::runtime_error(prefix + key + (allow_empty ? " must be a string" : " must be a non-empty string"));
   return value.get<std::string>();
 }
 
 bool ReadBool(const Json &object, const char *key, bool fallback, const std::string &prefix)
 {
   if (!object.contains(key)) return fallback;
-  if (!object.at(key).is_boolean()) throw std::runtime_error(prefix + key + " 必须是布尔值");
+  if (!object.at(key).is_boolean()) throw std::runtime_error(prefix + key + " must be a boolean");
   return object.at(key).get<bool>();
 }
 
@@ -68,45 +68,45 @@ void LoadServer(const Json &object, ServerConfig &config)
 
 void LoadAuth(const Json &object, ServerConfig &config)
 {
-  CheckFields(object, "auth", {"registration_enabled", "min_password_length", "max_password_length",
+  CheckFields(object, "auth", {"registration_enabled", "admin_password_hash", "min_password_length", "max_password_length",
       "key_namespace", "login_attempts", "login_window_seconds", "operation_attempts", "operation_window_seconds", "password_verification_seconds",
-      "session_namespace", "session_idle_seconds", "session_absolute_seconds", "cookie_name", "secure_cookie", "allowed_origins"});
-  auto &account = config.account;
-  account.registration_enabled = ReadBool(object, "registration_enabled", account.registration_enabled, "auth.");
-  account.min_password_length = ReadNumber(object, "min_password_length", account.min_password_length, 15, "auth.", 128);
-  account.max_password_length = ReadNumber(object, "max_password_length", account.max_password_length, account.min_password_length, "auth.", 128);
-  account.key_namespace = ReadString(object, "key_namespace", account.key_namespace, "auth.");
-  account.login_attempts = ReadNumber(object, "login_attempts", account.login_attempts, 1, "auth.");
-  account.login_window = std::chrono::seconds(ReadNumber(object, "login_window_seconds", account.login_window.count(), 1, "auth."));
-  account.operation_attempts = ReadNumber(object, "operation_attempts", account.operation_attempts, 1, "auth.");
-  account.operation_window = std::chrono::seconds(ReadNumber(object, "operation_window_seconds", account.operation_window.count(), 1, "auth."));
-  account.password_verification_timeout = std::chrono::seconds(ReadNumber(object, "password_verification_seconds", account.password_verification_timeout.count(), 1, "auth.", 3600));
-  config.session.key_namespace = ReadString(object, "session_namespace", config.session.key_namespace, "auth.");
-  config.session.idle_timeout = std::chrono::seconds(ReadNumber(object, "session_idle_seconds", config.session.idle_timeout.count(), 1, "auth."));
-  config.session.absolute_timeout = std::chrono::seconds(ReadNumber(object, "session_absolute_seconds", config.session.absolute_timeout.count(), 1, "auth."));
+      "session_namespace", "session_idle_seconds", "cookie_name", "secure_cookie", "allowed_origins"});
+  auto &auth = config.auth;
+  auth.admin_password_hash = ReadString(object, "admin_password_hash", auth.admin_password_hash, "auth.", true);
+  auth.registration_enabled = ReadBool(object, "registration_enabled", auth.registration_enabled, "auth.");
+  auth.min_password_length = ReadNumber(object, "min_password_length", auth.min_password_length, 8, "auth.", 128);
+  auth.max_password_length = ReadNumber(object, "max_password_length", auth.max_password_length, auth.min_password_length, "auth.", 128);
+  auth.key_namespace = ReadString(object, "key_namespace", auth.key_namespace, "auth.");
+  auth.login_attempts = ReadNumber(object, "login_attempts", auth.login_attempts, 1, "auth.");
+  auth.login_window = std::chrono::seconds(ReadNumber(object, "login_window_seconds", auth.login_window.count(), 1, "auth."));
+  auth.operation_attempts = ReadNumber(object, "operation_attempts", auth.operation_attempts, 1, "auth.");
+  auth.operation_window = std::chrono::seconds(ReadNumber(object, "operation_window_seconds", auth.operation_window.count(), 1, "auth."));
+  auth.password_verification_timeout = std::chrono::seconds(ReadNumber(object, "password_verification_seconds", auth.password_verification_timeout.count(), 1, "auth.", 3600));
+  auth.session_namespace = ReadString(object, "session_namespace", auth.session_namespace, "auth.");
+  auth.session_idle_timeout = std::chrono::seconds(ReadNumber(object, "session_idle_seconds", auth.session_idle_timeout.count(), 1, "auth."));
   config.cookie_name = ReadString(object, "cookie_name", config.cookie_name, "auth.");
   if (config.cookie_name.size() > 64 || config.cookie_name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != config.cookie_name.npos)
-    throw std::runtime_error("auth.cookie_name 无效");
+    throw std::runtime_error("Invalid auth.cookie_name");
   config.secure_cookie = ReadBool(object, "secure_cookie", config.secure_cookie, "auth.");
   if (object.contains("allowed_origins"))
   {
-    if (!object["allowed_origins"].is_array()) throw std::runtime_error("auth.allowed_origins 必须是数组");
+    if (!object["allowed_origins"].is_array()) throw std::runtime_error("auth.allowed_origins must be an array");
     for (const auto &entry : object["allowed_origins"])
     {
-      if (!entry.is_string()) throw std::runtime_error("auth.allowed_origins 必须是来源字符串数组");
+      if (!entry.is_string()) throw std::runtime_error("auth.allowed_origins must be an array of origin strings");
       auto value = entry.get<std::string>();
       auto prefix = value.rfind("https://", 0) == 0 ? 8 : value.rfind("http://", 0) == 0 ? 7 : 0;
       if (!prefix || value.size() <= static_cast<std::size_t>(prefix) || value.find_first_of("/\r\n*?#@ ", prefix) != value.npos)
-        throw std::runtime_error("auth.allowed_origins 必须填写完整的 HTTP(S) 来源，不含路径");
+        throw std::runtime_error("auth.allowed_origins must contain full HTTP(S) origins without paths");
       config.allowed_origins.push_back(value);
     }
   }
 }
 
-void LoadEmail(const Json &object, auth::EmailConfig &config)
+void LoadEmail(const Json &object, auth::Config &config)
 {
   CheckFields(object, "email", {"key_namespace", "code_timeout_seconds", "resend_interval_seconds", "max_code_attempts", "smtp"});
-  config.key_namespace = ReadString(object, "key_namespace", config.key_namespace, "email.");
+  config.email_namespace = ReadString(object, "key_namespace", config.email_namespace, "email.");
   config.code_timeout = std::chrono::seconds(ReadNumber(object, "code_timeout_seconds", config.code_timeout.count(), 1, "email."));
   config.resend_interval = std::chrono::seconds(ReadNumber(object, "resend_interval_seconds", config.resend_interval.count(), 1, "email."));
   config.max_code_attempts = ReadNumber(object, "max_code_attempts", config.max_code_attempts, 1, "email.", 20);
@@ -116,7 +116,7 @@ void LoadEmail(const Json &object, auth::EmailConfig &config)
   config.smtp.host = ReadString(smtp, "host", config.smtp.host, "email.smtp.", true);
   config.smtp.port = ReadNumber(smtp, "port", config.smtp.port, 1, "email.smtp.", 65535);
   auto security = ReadString(smtp, "security", "tls", "email.smtp.");
-  if (security != "tls" && security != "starttls") throw std::runtime_error("email.smtp.security 须为 tls 或 starttls");
+  if (security != "tls" && security != "starttls") throw std::runtime_error("email.smtp.security must be tls or starttls");
   config.smtp.security = security == "tls" ? auth::SmtpSecurity::Tls : auth::SmtpSecurity::StartTls;
   config.smtp.username = ReadString(smtp, "username", config.smtp.username, "email.smtp.", true);
   config.smtp.password = ReadString(smtp, "password", config.smtp.password, "email.smtp.", true);
@@ -170,7 +170,7 @@ ServerConfig LoadServerConfig(const char *path)
   {
     std::ifstream input(path);
     if (!input)
-      throw std::runtime_error("无法打开配置文件");
+      throw std::runtime_error("Failed to open configuration file");
     std::vector<std::set<std::string>> keys;
     auto root = Json::parse(input, [&keys](int depth, Json::parse_event_t event, Json &value)
     {
@@ -181,7 +181,7 @@ ServerConfig LoadServerConfig(const char *path)
         keys.pop_back();
       else if (event == Json::parse_event_t::key &&
                !keys.back().insert(value.get<std::string>()).second)
-        throw std::runtime_error("重复配置项：" + value.get<std::string>());
+        throw std::runtime_error("Duplicate configuration field: " + value.get<std::string>());
       return true;
     });
     CheckFields(root, "", {"server", "mysql", "redis", "auth", "email", "models", "docker"});
@@ -192,7 +192,7 @@ ServerConfig LoadServerConfig(const char *path)
       ReadString(root["docker"], "mysql_root_password", "", "docker.", true);
     }
     if (root.contains("models") && !root["models"].is_array())
-      throw std::runtime_error("models 必须是数组");
+      throw std::runtime_error("models must be an array");
 
     ServerConfig config;
     if (root.contains("server"))
@@ -202,15 +202,15 @@ ServerConfig LoadServerConfig(const char *path)
     if (root.contains("redis"))
       LoadRedis(root.at("redis"), config.redis);
     if (root.contains("auth")) LoadAuth(root.at("auth"), config);
-    if (root.contains("email")) LoadEmail(root.at("email"), config.email);
+    if (root.contains("email")) LoadEmail(root.at("email"), config.auth);
     return config;
   }
   catch (const Json::parse_error &)
   {
-    throw std::runtime_error(std::string(path) + "：配置不是有效 JSON");
+    throw std::runtime_error(std::string(path) + ": configuration is not valid JSON");
   }
   catch (const std::exception &error)
   {
-    throw std::runtime_error(std::string(path) + "：" + error.what());
+    throw std::runtime_error(std::string(path) + ": " + error.what());
   }
 }

@@ -17,6 +17,7 @@ namespace auth
   {
     InvalidRequest,
     Unauthenticated,
+    Forbidden,
     InvalidCredentials,
     ReauthenticationRequired,
     InvalidCode,
@@ -47,9 +48,16 @@ namespace auth
     std::optional<std::string> email; // 仅包含已验证并正式绑定的邮箱。
     TimePoint created_at{};
     TimePoint updated_at{};
+    bool disabled = false;
   };
 
-  // 由 Session 鉴权产生，不能用请求体中的用户 ID 构造可信身份。
+  struct UserPage
+  {
+    std::vector<User> items;
+    UserId next_before_id = 0;
+  };
+
+  // 由 Auth 鉴权产生，不能用请求体中的用户 ID 构造可信身份。
   struct AuthContext
   {
     UserId user_id = 0;
@@ -60,7 +68,7 @@ namespace auth
   {
     AuthContext context;
     std::string token;      // 仅创建时交付，供 HTTP 层设置 Cookie，不记日志。
-    TimePoint expires_at{}; // 本次登录的绝对上限，闲置上限仍单独生效。
+    TimePoint expires_at{}; // 本次闲置到期时间；有效请求会续期。
   };
 
   struct DeviceSession

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>用户管理 · Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/src/styles.css">
+  <link rel="stylesheet" href="/src/admin.css">
+</head>
+<body class="admin-body">
+  <header class="admin-topbar"><a href="/" class="admin-brand">Chat</a><span>管理后台</span><a href="/" class="admin-chat-link">返回对话</a></header>
+  <main>
+    <section id="admin-login" class="admin-login" aria-labelledby="login-title" hidden>
+      <h1 id="login-title">登录管理后台</h1>
+      <form id="admin-login-form" class="account-form">
+        <label>管理密码<input name="password" type="password" autocomplete="current-password" maxlength="128" required autofocus></label>
+        <p id="login-status" role="status" aria-live="polite"></p>
+        <button class="primary-button" type="submit">进入后台</button>
+      </form>
+    </section>
+    <section id="admin-panel" class="admin-panel" aria-labelledby="admin-title" hidden>
+      <header class="admin-heading"><h1 id="admin-title">用户管理</h1><button id="admin-logout" class="text-button" type="button">退出管理</button></header>
+      <form id="admin-search" class="admin-toolbar" role="search">
+        <label for="user-search" class="visually-hidden">搜索用户</label>
+        <input id="user-search" type="search" placeholder="搜索用户名、邮箱或 ID" maxlength="254">
+        <button class="primary-button" type="submit">搜索</button>
+        <button id="admin-refresh" class="text-button" type="button">刷新</button>
+      </form>
+      <p id="admin-status" role="status" aria-live="polite"></p>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead><tr><th scope="col">用户</th><th scope="col">邮箱</th><th scope="col">状态</th><th scope="col">注册时间</th><th scope="col" class="admin-action-heading">操作</th></tr></thead>
+          <tbody id="admin-users"></tbody>
+        </table>
+        <p id="admin-empty" class="admin-empty" hidden>没有找到用户</p>
+      </div>
+      <footer class="admin-footer"><span id="admin-count"></span><button id="admin-more" class="text-button" type="button" hidden>加载更多</button></footer>
+    </section>
+    <p id="admin-initial" class="admin-initial" role="status">正在加载…</p>
+  </main>
+  <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="dialog-title">
+    <form id="admin-action-form" class="account-form">
+      <h2 id="dialog-title"></h2>
+      <p id="dialog-description"></p>
+      <label id="dialog-username-label" hidden>用户名<input name="username" autocomplete="off" minlength="3" maxlength="32" pattern="[A-Za-z][A-Za-z0-9_]{2,31}"></label>
+      <p id="dialog-status" role="status" aria-live="polite"></p>
+      <div class="admin-dialog-actions"><button id="dialog-cancel" class="text-button" type="button">取消</button><button id="dialog-submit" class="primary-button" type="submit">保存</button></div>
+    </form>
+  </dialog>
+  <script src="/src/admin.js"></script>
+</body>
+</html>
