@@ -322,6 +322,23 @@ CHAT-19 需要直接调用 `History::SaveProgress` / `History::Finish` 的测试
 
 发布验收要求：两种后端的 P0 用例全部通过；变更涉及的 P1 通过；故障恢复后可重新登录并完成新一轮聊天；所有失败有问题记录。P2 按预先填写的性能目标判定。
 
+### 9.1 SSE 空闲超时回归
+
+在允许 `io_uring` 的 Linux 主机上安装 Python 3 和本地 Docker，从项目根目录运行。脚本使用本机模拟模型，启动临时 MySQL 8.4 和 Redis 8.0，两种后端一起跑，按实际的 60 秒空闲阈值计时。首次运行可能需要拉取容器镜像。
+
+```bash
+cmake -S . -B build-reactor -DNET_BACKEND=reactor -DCMAKE_BUILD_TYPE=Release
+cmake --build build-reactor --parallel 4
+cmake -S . -B build-proactor -DNET_BACKEND=proactor -DCMAKE_BUILD_TYPE=Release
+cmake --build build-proactor --parallel 4
+python3 scripts/test-sse-idle-timeout.py \
+  --reactor build-reactor/server --proactor build-proactor/server
+```
+
+两种后端各验证七种情况：正文流、心跳流、静默连接、半截请求、停止读取、极慢读取、模型先超时。脚本输出每个用例的结果，任一失败时返回非零。可用 `--case` 选跑，用 `--help` 查看用例名。[回归脚本](../scripts/test-sse-idle-timeout.py)
+
+脚本先用 `server --network-backend` 核对两个二进制的编译后端，再启动临时依赖。可用 `python3 scripts/test-sse-http-framing.py -v` 单独验证回归客户端能识别 HTTP 分块截断，仅需 Python 3 和本机回环连接。[分块测试](../scripts/test-sse-http-framing.py)
+
 ## 10. 执行记录模板
 
 | 项目 | 填写内容 |

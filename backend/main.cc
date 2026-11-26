@@ -1,12 +1,19 @@
 #include "core/Chat.hpp"
 #include "ServerConfig.hpp"
+#include "net/Config.hpp"
 #include <iostream>
+#include <string_view>
 
-int main(int argc, char **)
+int main(int argc, char **argv)
 {
+  if (argc == 2 && std::string_view(argv[1]) == "--network-backend")
+  {
+    std::cout << (CHAT_NET_PROACTOR ? "proactor" : "reactor") << '\n';
+    return 0;
+  }
   if (argc != 1)
   {
-    std::cerr << "Usage: server (edit config.json to configure startup)\n";
+    std::cerr << "Usage: server [--network-backend] (edit config.json to configure startup)\n";
     return 1;
   }
 
