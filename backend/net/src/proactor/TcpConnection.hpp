@@ -66,7 +66,7 @@ protected:
 private:
   ::TcpConnection &owner_;
   void ArmIdle()
-  { timer_ = loop_->timerQueue().AddTimer(NowMs() + kIdleTimeoutMs, [this] { HandleIdleTimeout(); }); }
+  { timer_ = loop_->timerQueue().AddTimer(last_active_ + kIdleTimeoutMs, [this] { HandleIdleTimeout(); }); }
   void Receive()
   {
     if (closed_ || recv_ || closing_ || reading_paused_ || business_paused_) return;
@@ -127,7 +127,11 @@ private:
         {
           send_ = 0;
           if (closed_ || loop_->stopping()) return;
-          if (result > 0) out_.retrieve(result);
+          if (result > 0)
+          {
+            last_active_ = NowMs();
+            out_.retrieve(result);
+          }
           else if (result != -EINTR)
           {
             if (result == -EPIPE)
