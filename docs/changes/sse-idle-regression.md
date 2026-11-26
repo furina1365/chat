@@ -8,4 +8,10 @@
 
 回归跑的是 Linux 本机连接、实际聊天服务和模拟模型。用户主动停止或断开后的模型取消由 [#3](https://github.com/furina1365/chat/issues/3) 跟踪。
 
+## MR #6 审查修订
+
+原来的脚本收到 `done` 后可能把少了最后一个空行的响应算成完整回复。传入复制的二进制也可能让两个 Reactor 的结果被当成双后端通过。现在脚本检查 HTTP 分块的结束标记，并在启动前核对每个 `server` 编译时选中的网络后端。
+
+测试服务给本机模拟模型的地址加代理豁免。项目技能示例用 `python3` 启动脚本，从 Git 导出的副本上已验证。开启代理时，双后端 14 项回归通过，代理记录到 0 次模型请求。[审查复验](sse-idle-regression-execution.md#mr-6-审查修订)
+
 [AI 执行与复查文档](sse-idle-regression-execution.md)

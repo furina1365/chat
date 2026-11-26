@@ -337,6 +337,8 @@ python3 scripts/test-sse-idle-timeout.py \
 
 两种后端各验证七种情况：正文流、心跳流、静默连接、半截请求、停止读取、极慢读取、模型先超时。脚本输出每个用例的结果，任一失败时返回非零。可用 `--case` 选跑，用 `--help` 查看用例名。[回归脚本](../scripts/test-sse-idle-timeout.py)
 
+脚本先用 `server --network-backend` 核对两个二进制的编译后端，再启动临时依赖。可用 `python3 scripts/test-sse-http-framing.py -v` 单独验证回归客户端能识别 HTTP 分块截断，仅需 Python 3 和本机回环连接。[分块测试](../scripts/test-sse-http-framing.py)
+
 ## 10. 执行记录模板
 
 | 项目 | 填写内容 |

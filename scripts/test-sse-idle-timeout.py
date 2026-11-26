@@ -7,7 +7,9 @@ from contextlib import ExitStack, contextmanager
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -226,12 +228,14 @@ class Chat:
             peer.connect((HOST, self.port))
             started = time.monotonic()
             peer.sendall(request)
-            with http.client.HTTPResponse(peer) as response:
-                response.begin()
-                require(response.status == 200 and response.chunked and
-                        response.getheader("Content-Type", "").startswith("text/event-stream"),
-                        f"{case}: expected HTTP 200 with chunked SSE, got {response.status} {response.headers}")
-                yield conversation, peer, response, started
+            with peer.makefile("rb") as wire:
+                status = wire.readline(8193)
+                headers = http.client.parse_headers(wire)
+                require(status.startswith(b"HTTP/1.1 200 ") and
+                        headers.get("Transfer-Encoding", "").lower() == "chunked" and
+                        headers.get("Content-Type", "").startswith("text/event-stream"),
+                        f"{case}: expected HTTP 200 with chunked SSE, got {status!r} {headers}")
+                yield conversation, peer, wire, started
 
 
 @contextmanager
@@ -257,8 +261,14 @@ def chat_server(binary, model, mysql_port, redis_port):
             for name, timeout in [("long-timeout", IDLE_SECONDS + 25), ("short-timeout", MODEL_TIMEOUT_SECONDS)]
         ]
         (Path(directory) / "config.json").write_text(json.dumps(config))
+        env = os.environ.copy()
+        # libcurl prefers the lowercase variable when both are set.
+        excluded = env.get("no_proxy") or env.get("NO_PROXY")
+        if excluded != "*":
+            excluded = f"{HOST},{excluded}" if excluded else HOST
+        env["no_proxy"] = env["NO_PROXY"] = excluded
         with tempfile.TemporaryFile(mode="w+t") as log:
-            process = subprocess.Popen([binary], cwd=directory, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([binary], cwd=directory, env=env, stdout=log, stderr=subprocess.STDOUT)
             try:
                 def ready():
                     require(process.poll() is None, f"server exited with code {process.returncode}")
@@ -286,20 +296,34 @@ def chat_server(binary, model, mysql_port, redis_port):
                         process.wait()
 
 
-def frames(response, started):
+def chunk_payloads(wire):
+    while True:
+        line = wire.readline(8193)
+        size = line[:-2].split(b";", 1)[0]
+        require(line.endswith(b"\r\n") and re.fullmatch(rb"[0-9a-fA-F]+", size),
+                "missing or malformed HTTP chunk size line")
+        remaining = int(size, 16)
+        if not remaining:
+            # The zero chunk may carry trailers, but always ends with a blank CRLF line.
+            while True:
+                trailer = wire.readline(8193)
+                if trailer == b"\r\n":
+                    return
+                require(trailer.endswith(b"\r\n") and b":" in trailer,
+                        "incomplete or malformed final HTTP chunk")
+        while remaining:
+            payload = wire.read1(min(remaining, 4096))
+            require(payload, "truncated HTTP chunk payload")
+            remaining -= len(payload)
+            yield payload
+        require(wire.read(2) == b"\r\n", "missing HTTP chunk payload delimiter")
+
+
+def frames(wire, started):
     fields = {}
     pending = b""
-    while True:
+    for data in chunk_payloads(wire):
         require(time.monotonic() - started < IDLE_SECONDS + 15, "SSE did not finish within the test window")
-        try:
-            # HTTPResponse.readline uses peek, which can hide a truncated chunked stream.
-            data = response.read1(4096)
-        except http.client.IncompleteRead as error:
-            elapsed = time.monotonic() - started
-            raise AssertionError(f"SSE ended without the final HTTP chunk after {elapsed:.2f}s") from error
-        if not data:
-            require(not pending and not fields, "SSE ended mid-event")
-            return
         pending += data
         while b"\n" in pending:
             raw, pending = pending.split(b"\n", 1)
@@ -312,6 +336,7 @@ def frames(response, started):
             elif ":" in line:
                 name, value = line.split(":", 1)
                 fields[name] = value.strip()
+    require(not pending and not fields, "SSE ended mid-event")
 
 
 def completed_stream(chat, case):
@@ -480,8 +505,13 @@ def main():
     for name, binary in servers.items():
         if not binary.is_file():
             parser.error(f"{name} server does not exist: {binary}")
-    if servers["reactor"].samefile(servers["proactor"]):
-        parser.error("supply separate Reactor and Proactor builds")
+        try:
+            reported = subprocess.run([binary, "--network-backend"], check=True,
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            parser.error(f"cannot query the network backend of {binary}; rebuild server from this checkout")
+        if reported != name:
+            parser.error(f"--{name} expects a {name} server, but {binary} reports {reported!r}")
     cases = tuple(dict.fromkeys(args.case)) if args.case else CASES
     with ExitStack() as stack:
         database_ports = start_databases(stack)

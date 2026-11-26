@@ -72,6 +72,20 @@ python3 scripts/test-sse-idle-timeout.py \
 
 模型超时的两条请求都收到了部分正文和 SSE `error`，HTTP 分块正常结束。历史接口返回 `failed` 和部分正文，`active_message_id` 为 `null`。验证范围为 Linux 回环、真实聊天服务和模拟模型。客户端主动停止或断开由 [#3](https://github.com/furina1365/chat/issues/3) 跟踪。
 
+## MR #6 审查修订
+
+审查基线 `7502f1f`。`Chat.stream` 从回环 HTTP 套接字读响应，解析分块的同时拼接 SSE 事件，读完整的尾部才算响应正常结束。测试入口调用 `server --network-backend`，匹配 CMake 给网络代码使用的同一个宏，再启动数据库和服务。`chat_server` 给子进程的代理排除列表补入回环地址。[回归脚本](../../scripts/test-sse-idle-timeout.py) · [服务入口](../../backend/main.cc#L7) · [后端编译配置](../../CMakeLists.txt#L56)
+
+| 因素 | 场景 | 验收点 | 红 → 绿 |
+| --- | --- | --- | --- |
+| HTTP 完整性 | 先收到 `done`，分别送完整尾部和五种截断尾部 | 独立核对分块和 SSE | 旧版误接受四种截断 → 五种截断均被拒绝，完整尾部通过 |
+| 分块与 SSE 边界，隐藏 | 一个事件跨两个 HTTP 块，含分块扩展和尾部字段 | 完整合法的响应可以结束 | 两个版本均能解析出完整 `done` |
+| 代理配置，隐藏 | `http_proxy` 指向本地记录代理，小写和大写排除列表分别缺回环 IP | 模拟模型收到请求，代理记录为 0 | 小写配置命中代理 2 次 → 两种配置均为 0 次 |
+| 后端身份 | 同一文件、不同路径的 Reactor 副本、两个参数对调、旧版二进制、正确的两套构建 | 错误输入在启动依赖前退出，正确输入按真实后端运行 | Reactor 副本被当成 Proactor 通过 → 四种错误输入均退出 2，正确构建通过 |
+| 脚本权限 | Git 中的脚本权限为 `100644` | 文档命令可创建、生成并验证临时技能 | 三个直接执行命令退出 126 → 用 `python3` 均退出 0 |
+
+`python3 scripts/test-sse-http-framing.py -v` 的 3 个测试通过，包含 5 种截断尾部。随后按测试手册重编两套 Release 二进制并跑全量，14 项通过。全量运行的 `http_proxy` 指向本机记录代理，`no_proxy=localhost,.example.invalid`。仅提供 `NO_PROXY` 的独立验证选跑模型超时，两套后端均通过。两次运行的代理记录均为 0。技能命令在 `git archive` 导出的脚本上依次创建临时技能、生成 `agents/openai.yaml` 并验证技能结构。[分块测试](../../scripts/test-sse-http-framing.py) · [回归命令](../testing.md#91-sse-空闲超时回归)
+
 ## 使用的技能
 
-[implement-and-document](../../.agents/skills/implement-and-document/SKILL.md) · [trace-change-code](../../.agents/skills/trace-change-code/SKILL.md) · [plan-change](../../.agents/skills/plan-change/SKILL.md) · [execute-change](../../.agents/skills/execute-change/SKILL.md) · [tdd](../../.agents/skills/implement-and-document/references/skills/tdd/SKILL.md) · [systematic-debugging](../../.agents/skills/implement-and-document/references/skills/systematic-debugging/SKILL.md) · [verification-before-completion](../../.agents/skills/implement-and-document/references/skills/verification-before-completion/SKILL.md)
+[implement-and-document](../../.agents/skills/implement-and-document/SKILL.md) · [trace-change-code](../../.agents/skills/trace-change-code/SKILL.md) · [plan-change](../../.agents/skills/plan-change/SKILL.md) · [execute-change](../../.agents/skills/execute-change/SKILL.md) · [tdd](../../.agents/skills/implement-and-document/references/skills/tdd/SKILL.md) · [systematic-debugging](../../.agents/skills/implement-and-document/references/skills/systematic-debugging/SKILL.md) · [verification-before-completion](../../.agents/skills/implement-and-document/references/skills/verification-before-completion/SKILL.md) · [skill-creator](../../.agents/skills/implement-and-document/references/skills/skill-creator/SKILL.md)
