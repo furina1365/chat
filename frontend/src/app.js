@@ -35,13 +35,16 @@
   var modelError = "";
   var defaultModel = null;
   var streamFrame = null;
+  var streamElement = null;
   var scrollArea = $("#conversation-scroll");
   var pending = /* @__PURE__ */ new Map();
+  var pendingSends = /* @__PURE__ */ new Map();
+  var pendingRegenerates = /* @__PURE__ */ new Map();
   var selectingBranches = /* @__PURE__ */ new Set();
   var failures = /* @__PURE__ */ new Map();
   var notices = /* @__PURE__ */ new Map();
   var drafts = /* @__PURE__ */ new Map();
-  var messageContentCache = /* @__PURE__ */ new WeakMap();
+  var messageViews = /* @__PURE__ */ new WeakMap();
   var reasoningViews = /* @__PURE__ */ new WeakMap();
   var conversations = [];
   var activeId = null;
@@ -51,7 +54,13 @@
   var authMode = "login";
   var nextHistory = null;
   var polling = /* @__PURE__ */ new Map();
+  var conversationErrors = /* @__PURE__ */ new Map();
+  var latestRefresh = /* @__PURE__ */ new WeakMap();
+  var conversationLoad = null;
   var formError = "";
+  var creatingConversation = null;
+  var newDraftVersion = 0;
+  var createError = "";
   var accountView = "home";
   var accountViewVersion = 0;
   var logoutAllReturnView = "home";
@@ -70,9 +79,10 @@
     return svg;
   }
   var ApiError = class extends Error {
-    constructor(message, code) {
+    constructor(message, code, status2) {
       super(message);
       __publicField(this, "code", code);
+      __publicField(this, "status", status2);
     }
   };
   function errorCode(error) {
@@ -88,6 +98,25 @@
       error: "error" in data && typeof data.error === "string" ? data.error : void 0
     };
   }
+  function matchingPendingSend(id, text = prompt.value.trim()) {
+    if (!id) return void 0;
+    const send = pendingSends.get(id);
+    return send && send.content === text ? send : void 0;
+  }
+  function clearConfirmedSend(id, send) {
+    if (pendingSends.get(id) === send) pendingSends.delete(id);
+    if (drafts.get(id) === send.raw) drafts.delete(id);
+    if (activeId === id && prompt.value === send.raw) {
+      prompt.value = "";
+      resizePrompt();
+    }
+  }
+  function unsavedFailureMessage(error) {
+    if (error instanceof TypeError || errorCode(error) === "stream_incomplete") {
+      return "\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF0C\u4FDD\u5B58\u7ED3\u679C\u5C1A\u672A\u786E\u8BA4\uFF0C\u53EF\u7528\u539F\u8BF7\u6C42\u91CD\u8BD5\u3002";
+    }
+    return errorMessage(error);
+  }
   async function api(path, body) {
     const epoch = authEpoch;
     const response = await fetch(`${apiBase}${path}`, {
@@ -97,11 +126,11 @@
       body: body === void 0 ? void 0 : JSON.stringify(body)
     });
     const data = await response.json().catch(() => ({}));
-    if (epoch !== authEpoch) throw new ApiError("\u8D26\u53F7\u5DF2\u5207\u6362\u3002", "session_changed");
+    if (epoch !== authEpoch) throw new ApiError("\u8D26\u53F7\u5DF2\u5207\u6362\u3002", "session_changed", response.status);
     if (!response.ok) {
       const failure = errorPayload(data);
       if (failure.code === "unauthenticated" && currentUser) signedOut("\u767B\u5F55\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
-      throw new ApiError(failure.error || "\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", failure.code || "request_failed");
+      throw new ApiError(failure.error || "\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002", failure.code || "request_failed", response.status);
     }
     return data;
   }
@@ -151,10 +180,16 @@
     for (const timer of polling.values()) clearTimeout(timer);
     polling.clear();
     pending.clear();
+    pendingSends.clear();
+    pendingRegenerates.clear();
     drafts.clear();
     failures.clear();
     notices.clear();
     selectingBranches.clear();
+    conversationErrors.clear();
+    conversationLoad = null;
+    creatingConversation = null;
+    createError = "";
     conversations = [];
     activeId = null;
     models = [];
@@ -176,13 +211,19 @@
   }
   async function startSession(user) {
     currentUser = user;
-    ++authEpoch;
+    const epoch = ++authEpoch;
+    const initialId = conversationIdFromUrl();
+    activeId = initialId;
     $("#auth-form").reset();
     $("#auth-screen").hidden = true;
     shell.hidden = false;
     updateAccountUser(user);
     render();
-    await Promise.all([loadModels(), loadHistory()]);
+    await Promise.all([loadModels(), loadHistory().then(() => {
+      if (epoch === authEpoch && initialId && activeId === initialId && !currentConversation()?.loaded && !conversationLoad) {
+        return switchConversation(initialId, true);
+      }
+    })]);
   }
   async function loadHistory(more = false) {
     if (!currentUser) return;
@@ -190,44 +231,76 @@
       let query = "";
       if (more && nextHistory) query = `?before_updated_at=${nextHistory.before_updated_at}&before_id=${nextHistory.before_id}`;
       const data = await api(`/api/conversations${query}`);
-      const existing = new Map(conversations.map((item) => [item.id, item]));
-      const items = data.items.map((item) => ({ ...item, messages: existing.get(item.id)?.messages || [], loaded: existing.get(item.id)?.loaded || false, provider: existing.get(item.id)?.provider, model: existing.get(item.id)?.model }));
-      conversations = more ? [...conversations, ...items.filter((item) => !existing.has(item.id))] : items;
+      const existing = new Set(conversations.map((item) => item.id));
+      conversations.push(...data.items.filter((item) => !existing.has(item.id)).map((item) => ({ ...item, messages: [], loaded: false })));
       nextHistory = data.next;
       $("#more-history").hidden = !nextHistory;
       historyError = "";
-      const id = activeId || conversationIdFromUrl();
-      if (id) await switchConversation(id, true);
-      else render();
+      render();
     } catch (error) {
       if (currentUser && errorCode(error) !== "session_changed") {
-        historyError = errorMessage(error);
+        historyError = error instanceof TypeError ? "\u65E0\u6CD5\u8FDE\u63A5\u670D\u52A1\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002" : errorMessage(error);
         render();
       }
     }
   }
   async function refreshConversation(conversation) {
-    const data = await api(`/api/conversation?id=${conversation.id}`);
-    if (!conversations.includes(conversation)) return;
-    Object.assign(conversation, data.conversation, { messages: data.messages, loaded: true });
+    const refresh = {};
+    latestRefresh.set(conversation, refresh);
+    try {
+      const data = await api(`/api/conversation?id=${conversation.id}`);
+      if (latestRefresh.get(conversation) === refresh && conversations.includes(conversation)) {
+        applyConversation(conversation, data);
+        return true;
+      }
+    } catch (error) {
+      if (latestRefresh.get(conversation) === refresh && conversations.includes(conversation)) throw error;
+    }
+  }
+  function updateConversationMessages(conversation, messages) {
+    const previous = new Map(conversation.messages.map((message) => [message.id, message]));
+    conversation.messages = messages.map((message) => {
+      const existing = message.id && previous.get(message.id);
+      const keys = Object.keys(message);
+      if (!existing || Object.keys(existing).length !== keys.length) return message;
+      const unchanged = keys.every((key) => key === "versions" ? JSON.stringify(message.versions) === JSON.stringify(existing.versions) : message[key] === existing[key]);
+      return unchanged ? existing : message;
+    });
+  }
+  function applyConversation(conversation, data) {
+    conversationErrors.delete(conversation.id);
+    Object.assign(conversation, data.conversation, { loaded: true });
+    updateConversationMessages(conversation, data.messages);
     const last = conversation.messages.at(-1);
     if (last?.error) failures.set(conversation.id, last.error);
     else failures.delete(conversation.id);
-    if ((conversation.active_message_id || last?.state === "generating") && !pending.has(conversation.id)) {
-      clearTimeout(polling.get(conversation.id));
-      polling.set(conversation.id, setTimeout(async () => {
-        polling.delete(conversation.id);
-        if (currentUser && conversations.includes(conversation) && !pending.has(conversation.id)) {
-          try {
-            await refreshConversation(conversation);
-            render();
-          } catch (error) {
-            historyError = errorMessage(error);
-            render();
-          }
-        }
-      }, 1e3));
-    }
+    scheduleConversationPoll(conversation);
+  }
+  function isGenerating(conversation) {
+    return Boolean(conversation?.active_message_id) || conversation?.messages.at(-1)?.state === "generating";
+  }
+  function recordConversationError(conversationId, error) {
+    conversationErrors.set(conversationId, error instanceof TypeError ? "\u65E0\u6CD5\u8FDE\u63A5\u670D\u52A1\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002" : errorMessage(error));
+  }
+  function isRetryableConversationError(error) {
+    return error instanceof TypeError || error instanceof ApiError && (!error.status || error.status >= 500 || error.status === 429);
+  }
+  function scheduleConversationPoll(conversation, delay = 1e3) {
+    const { id } = conversation;
+    if (polling.has(id) || pending.has(id) || !isGenerating(conversation)) return;
+    polling.set(id, setTimeout(async () => {
+      polling.delete(id);
+      if (!currentUser || !conversations.includes(conversation) || pending.has(id) || !isGenerating(conversation)) return;
+      if (conversationLoad?.id === id) return;
+      try {
+        await refreshConversation(conversation);
+      } catch (error) {
+        if (!currentUser || !conversations.includes(conversation) || errorCode(error) === "session_changed") return;
+        recordConversationError(id, error);
+        if (isRetryableConversationError(error)) scheduleConversationPoll(conversation, 2e3);
+      }
+      if (activeId === id && conversations.includes(conversation)) renderReplyProgress();
+    }, delay));
   }
   async function withForm(form, target, action) {
     const owner = form.closest("#account-page") || form;
@@ -667,40 +740,78 @@
     if (replace) history.replaceState(null, "", path);
     else history.pushState(null, "", path);
   }
+  function forgetConversation(id, message = "") {
+    pending.get(id)?.controller.abort();
+    pending.delete(id);
+    pendingSends.delete(id);
+    pendingRegenerates.delete(id);
+    failures.delete(id);
+    notices.delete(id);
+    drafts.delete(id);
+    conversationErrors.delete(id);
+    clearTimeout(polling.get(id));
+    polling.delete(id);
+    conversations = conversations.filter((conversation) => conversation.id !== id);
+    if (activeId === id) {
+      activeId = null;
+      conversationLoad = null;
+      updateConversationUrl(null, true);
+      prompt.value = drafts.get("new") || "";
+      formError = message;
+    }
+    render();
+    resizePrompt();
+  }
   async function switchConversation(id, replace = false) {
     if (!$("#account-page").hidden) closeAccount(false);
     drafts.set(activeId || "new", prompt.value);
     activeId = id;
+    const load = id && !pending.has(id) ? { id } : null;
+    conversationLoad = load;
     formError = "";
     prompt.value = drafts.get(id || "new") || "";
     updateConversationUrl(id, replace);
-    if (id && !pending.has(id)) {
-      let conversation = currentConversation();
-      try {
-        if (!conversation) {
-          const data = await api(`/api/conversation?id=${id}`);
-          conversation = { ...data.conversation, messages: data.messages, loaded: true };
-          conversations.push(conversation);
-        }
-        await refreshConversation(conversation);
-      } catch (error) {
-        historyError = errorMessage(error);
-        if (!conversation && activeId === id) {
-          activeId = null;
-          id = null;
-          updateConversationUrl(null, true);
-        }
-      }
-    }
-    if (activeId !== id) return;
     closeSidebar();
     render();
     resizePrompt();
     scrollToEnd();
-    if (!prompt.disabled) prompt.focus();
+    if (load) {
+      const conversation = currentConversation();
+      try {
+        if (conversation) await refreshConversation(conversation);
+        else {
+          const data = await api(`/api/conversation?id=${load.id}`);
+          if (conversationLoad !== load) return;
+          const existing = currentConversation();
+          const target = existing ?? { ...data.conversation, messages: [], loaded: false };
+          if (!existing) conversations.push(target);
+          applyConversation(target, data);
+        }
+      } catch (error) {
+        if (conversationLoad !== load) return;
+        if (error instanceof ApiError && error.status === 404) {
+          forgetConversation(load.id, "\u5BF9\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u5220\u9664\u3002");
+          return;
+        }
+        if (currentUser && errorCode(error) !== "session_changed") {
+          recordConversationError(load.id, error);
+          if (conversation && isRetryableConversationError(error)) scheduleConversationPoll(conversation, 2e3);
+        }
+      }
+      if (conversationLoad !== load) return;
+      conversationLoad = null;
+      const follow = isNearEnd();
+      render();
+      if (follow) scrollToEnd();
+    }
+    if (!prompt.disabled && (document.activeElement === document.body || document.activeElement === prompt)) {
+      prompt.focus({ preventScroll: true });
+    }
   }
   function newConversation() {
+    ++newDraftVersion;
     drafts.delete("new");
+    createError = "";
     if (activeId === null) prompt.value = "";
     switchConversation(null);
   }
@@ -728,20 +839,7 @@
           updateComposer();
           return;
         }
-        pending.get(conversation.id)?.controller.abort();
-        pending.delete(conversation.id);
-        failures.delete(conversation.id);
-        notices.delete(conversation.id);
-        drafts.delete(conversation.id);
-        conversations = conversations.filter((item) => item.id !== conversation.id);
-        if (activeId === conversation.id) {
-          activeId = null;
-          updateConversationUrl(null, true);
-          prompt.value = drafts.get("new") || "";
-          formError = "";
-        }
-        render();
-        resizePrompt();
+        forgetConversation(conversation.id);
       });
       row.append(link, remove);
       list.append(row);
@@ -775,19 +873,17 @@
     }
     return view.details;
   }
-  function modelHistory(messages) {
-    const history2 = [];
-    for (const message of messages) {
-      if (message.role === "assistant" && !message.content.trim()) {
-        history2.pop();
-        continue;
-      }
-      history2.push({ role: message.role, content: message.content });
-    }
-    return history2;
+  function latestQuestionId(conversation) {
+    const last = conversation.messages.at(-1);
+    const question = last?.role === "assistant" ? conversation.messages.at(-2) : last;
+    return question?.role === "user" ? question.id : void 0;
+  }
+  function matchingPendingRegenerate(conversation) {
+    const request = pendingRegenerates.get(conversation.id);
+    return request && request.questionId === latestQuestionId(conversation) ? request : void 0;
   }
   function conversationBusy(conversation) {
-    return pending.has(conversation.id) || selectingBranches.has(conversation.id) || Boolean(conversation.active_message_id) || conversation.messages.at(-1)?.state === "generating";
+    return !conversation.loaded || conversationLoad?.id === conversation.id || pending.has(conversation.id) || selectingBranches.has(conversation.id) || isGenerating(conversation);
   }
   async function selectReply(conversation, messageId, previousMessageId) {
     if (conversationBusy(conversation)) return;
@@ -800,11 +896,8 @@
     try {
       const data = await api("/api/conversation/select", { conversation_id: conversation.id, message_id: messageId });
       if (!conversations.includes(conversation)) return;
-      Object.assign(conversation, data.conversation, { messages: data.messages, loaded: true });
-      failures.delete(conversation.id);
+      applyConversation(conversation, data);
       notices.delete(conversation.id);
-      const last = conversation.messages.at(-1);
-      if (last?.error) failures.set(conversation.id, last.error);
     } catch (error) {
       if (currentUser && conversations.includes(conversation) && errorCode(error) !== "session_changed") {
         formError = error instanceof TypeError ? "\u65E0\u6CD5\u5207\u6362\u56DE\u590D\u7248\u672C\uFF0C\u8BF7\u91CD\u8BD5\u3002" : errorMessage(error);
@@ -854,80 +947,109 @@
     }
     return picker;
   }
-  function renderMessages() {
-    messagesElement.replaceChildren();
-    const conversation = currentConversation();
-    if (!conversation) return;
-    for (const message of conversation.messages) {
-      const flight2 = pending.get(conversation.id);
-      if (flight2?.regenerate && (flight2.text || flight2.reasoning) && message === conversation.messages.at(-1)) continue;
-      const article = document.createElement("article");
-      article.className = `message ${message.role}`;
-      if (message.id) article.dataset.messageId = message.id;
-      article.setAttribute("aria-label", message.role === "user" ? "\u4F60" : "AI \u7684\u56DE\u590D");
-      if (message.role === "user") article.textContent = message.content;
-      else {
-        let content = messageContentCache.get(message);
-        if (!content) {
-          content = document.createElement("div");
-          content.className = "message-content";
-          renderContent(content, message.content);
-          messageContentCache.set(message, content);
-        }
-        const actions = document.createElement("div");
-        actions.className = "message-actions";
-        const copy = document.createElement("button");
-        copy.className = "icon-button";
-        copy.title = "\u590D\u5236\u56DE\u590D";
-        copy.setAttribute("aria-label", "\u590D\u5236\u56DE\u590D");
-        copy.append(icon("copy"));
-        copy.hidden = !message.content.trim();
-        copy.addEventListener("click", async () => {
-          try {
-            if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(message.content);
-            else {
-              const field = document.createElement("textarea");
-              field.value = message.content;
-              field.style.position = "fixed";
-              field.style.opacity = "0";
-              document.body.append(field);
-              field.select();
-              const copied = document.execCommand("copy");
-              field.remove();
-              if (!copied) throw new Error("copy failed");
-            }
-            copy.title = "\u5DF2\u590D\u5236";
-            copy.setAttribute("aria-label", "\u5DF2\u590D\u5236");
-          } catch {
-            copy.title = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u9009\u62E9\u6587\u5B57\u590D\u5236";
-            copy.setAttribute("aria-label", copy.title);
+  function createMessageView(conversation, message) {
+    const article = document.createElement("article");
+    article.className = `message ${message.role}`;
+    if (message.id) article.dataset.messageId = message.id;
+    article.setAttribute("aria-label", message.role === "user" ? "\u4F60" : "AI \u7684\u56DE\u590D");
+    if (message.role === "user") article.textContent = message.content;
+    else {
+      const content = document.createElement("div");
+      content.className = "message-content";
+      renderContent(content, message.content);
+      const actions = document.createElement("div");
+      actions.className = "message-actions";
+      const copy = document.createElement("button");
+      copy.className = "icon-button";
+      copy.title = "\u590D\u5236\u56DE\u590D";
+      copy.setAttribute("aria-label", "\u590D\u5236\u56DE\u590D");
+      copy.append(icon("copy"));
+      copy.hidden = !message.content.trim();
+      copy.addEventListener("click", async () => {
+        try {
+          if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(message.content);
+          else {
+            const field = document.createElement("textarea");
+            field.value = message.content;
+            field.style.position = "fixed";
+            field.style.opacity = "0";
+            document.body.append(field);
+            field.select();
+            const copied = document.execCommand("copy");
+            field.remove();
+            if (!copied) throw new Error("copy failed");
           }
-        });
-        actions.append(copy);
-        if (message === conversation.messages.at(-1)) {
-          const regenerate = document.createElement("button");
-          regenerate.className = "regenerate-button";
-          regenerate.title = "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
-          regenerate.setAttribute("aria-label", "\u91CD\u8BD5\u56DE\u590D");
-          regenerate.disabled = conversationBusy(conversation);
-          regenerate.append(icon("retry"));
-          regenerate.addEventListener("click", () => requestReply(conversation, { regenerate: true }));
-          actions.append(regenerate);
+          copy.title = "\u5DF2\u590D\u5236";
+          copy.setAttribute("aria-label", "\u5DF2\u590D\u5236");
+        } catch {
+          copy.title = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u9009\u62E9\u6587\u5B57\u590D\u5236";
+          copy.setAttribute("aria-label", copy.title);
         }
-        const versions = replyVersionPicker(conversation, message);
-        if (versions) actions.append(versions);
-        if (message.reasoning) article.append(reasoningBlock(message, message.reasoning, message.interrupted && !message.content ? "interrupted" : "done"));
-        if (message.content) article.append(content);
-        if (message.truncated || message.interrupted) {
-          const note = document.createElement("p");
-          note.className = "truncated-note";
-          note.textContent = message.interrupted ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\uFF0C\u53EF\u4EE5\u53D1\u9001\u201C\u8BF7\u7EE7\u7EED\u201D\u3002";
-          article.append(note);
-        }
-        article.append(actions);
+      });
+      actions.append(copy);
+      const regenerate = document.createElement("button");
+      regenerate.className = "regenerate-button";
+      regenerate.title = "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
+      regenerate.setAttribute("aria-label", "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D");
+      regenerate.append(icon("retry"));
+      regenerate.addEventListener("click", () => regenerateReply(conversation));
+      actions.append(regenerate);
+      const versions = replyVersionPicker(conversation, message);
+      if (versions) actions.append(versions);
+      const interrupted = message.state !== "generating" && message.interrupted;
+      if (message.reasoning) {
+        const state = message.state === "generating" && !message.content ? "thinking" : interrupted && !message.content ? "interrupted" : "done";
+        article.append(reasoningBlock(message, message.reasoning, state));
       }
-      messagesElement.append(article);
+      if (message.content) article.append(content);
+      if (message.truncated || interrupted) {
+        const note = document.createElement("p");
+        note.className = "truncated-note";
+        note.textContent = interrupted ? message.state ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u63A5\u6536\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\uFF0C\u53EF\u4EE5\u53D1\u9001\u201C\u8BF7\u7EE7\u7EED\u201D\u3002";
+        article.append(note);
+      }
+      article.append(actions);
     }
+    return article;
+  }
+  function renderMessages() {
+    const conversation = currentConversation();
+    const articles = [];
+    if (conversation) {
+      const busy = conversationBusy(conversation);
+      const last = conversation.messages.at(-1);
+      for (const message of conversation.messages) {
+        let article = messageViews.get(message);
+        if (!article) {
+          article = createMessageView(conversation, message);
+          messageViews.set(message, article);
+        }
+        if (message.role === "assistant") {
+          const regenerate = article.querySelector(".regenerate-button");
+          regenerate.hidden = message !== last;
+          regenerate.disabled = busy;
+          if (message.versions && message.versions.total > 1) {
+            article.querySelector(".reply-version-previous").disabled = busy || !message.versions.previous_id;
+            article.querySelector(".reply-version-next").disabled = busy || !message.versions.next_id;
+          }
+        }
+        articles.push(article);
+      }
+    }
+    const visible = new Set(articles);
+    for (const child of Array.from(messagesElement.children)) {
+      if (child instanceof HTMLElement && child !== streamElement && !visible.has(child)) child.remove();
+    }
+    let next = messagesElement.firstElementChild;
+    for (const article of articles) {
+      if (article !== next) messagesElement.insertBefore(article, next);
+      next = article.nextElementSibling;
+    }
+    renderPendingReply();
+  }
+  function renderPendingReply() {
+    streamElement?.remove();
+    streamElement = null;
     const flight = pending.get(activeId);
     if (flight?.text || flight?.reasoning) {
       const article = document.createElement("article");
@@ -938,45 +1060,64 @@
       renderContent(content, flight.text);
       if (flight.reasoning) article.append(reasoningBlock(flight, flight.reasoning, flight.text ? "done" : "thinking"));
       if (flight.text) article.append(content);
-      messagesElement.append(article);
+      streamElement = article;
     } else if (flight) {
       const waiting = document.createElement("div");
       waiting.className = "pending";
       const dot = document.createElement("span");
       dot.className = "pending-dot";
-      waiting.append(dot, document.createTextNode("\u6B63\u5728\u7B49\u5F85\u56DE\u590D\u2026"));
-      messagesElement.append(waiting);
+      waiting.append(dot, document.createTextNode(!flight.assistantId && !flight.regenerate ? "\u6B63\u5728\u53D1\u9001\u5E76\u7B49\u5F85\u56DE\u590D\u2026" : "\u6B63\u5728\u7B49\u5F85\u56DE\u590D\u2026"));
+      streamElement = waiting;
     }
+    if (streamElement) messagesElement.append(streamElement);
   }
   function updateComposer() {
     const conversation = currentConversation();
+    const creating = activeId === null && creatingConversation !== null;
+    const loading = conversationLoad !== null;
+    const detailError = activeId ? conversationErrors.get(activeId) : void 0;
+    const unloaded = activeId !== null && !conversation?.loaded;
     const waiting = pending.has(activeId);
     const flight = pending.get(activeId);
     const thinking = flight?.reasoning && !flight.text;
+    const saving = Boolean(flight && !flight.assistantId && !flight.regenerate);
     const unanswered = conversation?.messages.at(-1)?.role === "user";
-    const remote = Boolean(conversation?.active_message_id) || conversation?.messages.at(-1)?.state === "generating";
+    const remote = isGenerating(conversation);
     const selecting = Boolean(conversation && selectingBranches.has(conversation.id));
-    prompt.disabled = !currentUser || waiting || remote || selecting || Boolean(unanswered);
-    prompt.placeholder = thinking ? "\u6B63\u5728\u601D\u8003\u2026" : waiting ? "\u6B63\u5728\u7B49\u5F85\u56DE\u590D\u2026" : unanswered ? "\u91CD\u8BD5\u4E0A\u4E00\u6761\u6D88\u606F\uFF0C\u6216\u65B0\u5EFA\u5BF9\u8BDD" : "\u6709\u4EC0\u4E48\u6211\u53EF\u4EE5\u5E2E\u4F60\uFF1F";
+    const activeUnsent = matchingPendingSend(activeId);
+    const uncertainSend = activeUnsent?.rejected ? void 0 : activeUnsent;
+    const activeRegenerate = !activeUnsent && conversation ? matchingPendingRegenerate(conversation) : void 0;
+    prompt.disabled = !currentUser || loading || unloaded || creating || waiting || remote || selecting || Boolean(unanswered);
+    prompt.placeholder = loading || unloaded ? "\u7B49\u5F85\u5BF9\u8BDD\u52A0\u8F7D" : thinking ? "\u6B63\u5728\u601D\u8003\u2026" : creating ? "\u6B63\u5728\u521B\u5EFA\u5BF9\u8BDD\u2026" : saving ? "\u6B63\u5728\u53D1\u9001\u2026" : waiting ? "\u6B63\u5728\u7B49\u5F85\u56DE\u590D\u2026" : unanswered ? "\u91CD\u8BD5\u4E0A\u4E00\u6761\u6D88\u606F\uFF0C\u6216\u65B0\u5EFA\u5BF9\u8BDD" : "\u6709\u4EC0\u4E48\u6211\u53EF\u4EE5\u5E2E\u4F60\uFF1F";
     const chosen = selectedModel();
     sendButton.hidden = waiting;
     stopButton.hidden = !waiting;
-    stopButton.disabled = pending.get(activeId)?.stopped === true;
-    sendButton.disabled = prompt.disabled || !prompt.value.trim() || !chosen;
-    modelSelect.disabled = waiting || selecting || !models.length;
+    stopButton.disabled = Boolean(flight?.stopped || flight?.finished);
+    sendButton.disabled = prompt.disabled || !prompt.value.trim() || !chosen || Boolean(uncertainSend);
+    modelSelect.disabled = loading || unloaded || creating || waiting || selecting || !models.length;
     if (modelSelect.disabled) closeModelMenu();
-    messagesElement.setAttribute("aria-busy", String(waiting));
-    retryButton.hidden = remote || waiting || selecting || !unanswered && !failures.has(activeId);
-    const error = formError || failures.get(activeId) || modelError || historyError;
+    messagesElement.setAttribute("aria-busy", String(waiting || remote || loading || unloaded && !detailError));
+    const canRetryCreate = activeId === null && Boolean(createError && prompt.value.trim());
+    const canRetryLoad = Boolean(detailError);
+    const canRetrySaved = !activeUnsent && (unanswered || failures.has(activeId) && Boolean(conversation?.messages.at(-1)));
+    const canResendDraft = activeUnsent?.rejected && chosen && !remote;
+    const canRetrySend = !remote && (uncertainSend || canResendDraft || activeRegenerate || canRetryCreate || canRetrySaved);
+    retryButton.hidden = loading || creating || waiting || selecting || !(canRetryLoad || canRetrySend);
+    const retryModel = canRetrySend ? (uncertainSend ?? activeRegenerate)?.model : void 0;
+    retryButton.textContent = retryModel ? "\u91CD\u8BD5\u539F\u8BF7\u6C42" : canRetryLoad && !canResendDraft ? "\u5237\u65B0\u5BF9\u8BDD" : "\u91CD\u8BD5";
+    retryButton.title = retryModel ? `\u4F7F\u7528\u539F\u8BF7\u6C42\u91CD\u8BD5\uFF08${retryModel.provider} / ${retryModel.model}\uFF09` : "";
+    const error = formError || activeUnsent?.error || activeRegenerate?.error || failures.get(activeId) || (activeId === null ? createError : detailError) || modelError || historyError;
+    const notice = notices.get(activeId) || "";
     status.classList.toggle("error", Boolean(error));
-    status.textContent = error || notices.get(activeId) || (remote && !waiting ? "\u56DE\u590D\u4ECD\u5728\u751F\u6210\uFF0C\u5386\u53F2\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002" : "") || (thinking ? "\u6B63\u5728\u601D\u8003\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : waiting ? "\u6B63\u5728\u751F\u6210\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : "") || (unanswered && !waiting ? "\u4E0A\u4E00\u6761\u6D88\u606F\u8FD8\u672A\u6536\u5230\u56DE\u590D\uFF0C\u53EF\u4EE5\u91CD\u8BD5\u3002" : "");
+    status.textContent = error || notice || (loading || unloaded ? "\u6B63\u5728\u52A0\u8F7D\u5BF9\u8BDD\u2026" : "") || (remote && !waiting ? "\u56DE\u590D\u4ECD\u5728\u751F\u6210\uFF0C\u5386\u53F2\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002" : "") || (flight?.stopped || flight?.finished ? "\u6B63\u5728\u66F4\u65B0\u5BF9\u8BDD\u2026" : "") || (creating ? "\u6B63\u5728\u521B\u5EFA\u5BF9\u8BDD\u2026" : thinking ? "\u6B63\u5728\u601D\u8003\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : saving ? "\u6B63\u5728\u53D1\u9001\u6D88\u606F\u2026" : waiting ? "\u6B63\u5728\u751F\u6210\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : "") || (unanswered && !waiting ? "\u4E0A\u4E00\u6761\u6D88\u606F\u8FD8\u672A\u6536\u5230\u56DE\u590D\uFF0C\u53EF\u4EE5\u91CD\u8BD5\u3002" : "");
   }
   function render() {
     const conversation = currentConversation();
-    workspace.classList.toggle("empty", !conversation);
-    $("#conversation-title").textContent = conversation?.title || "\u65B0\u5BF9\u8BDD";
-    $("#rename-conversation").hidden = !conversation;
-    document.title = `Chat \xB7 ${conversation?.title || "\u65B0\u5BF9\u8BDD"}`;
+    const title = conversation?.title || (activeId === null ? "\u65B0\u5BF9\u8BDD" : "\u5BF9\u8BDD");
+    workspace.classList.toggle("empty", activeId === null);
+    $("#conversation-title").textContent = title;
+    $("#rename-conversation").hidden = !conversation?.loaded;
+    document.title = `Chat \xB7 ${title}`;
     syncModelSelect();
     renderList();
     renderMessages();
@@ -987,15 +1128,21 @@
     prompt.style.height = `${Math.min(prompt.scrollHeight, 220)}px`;
   }
   function scrollToEnd() {
-    requestAnimationFrame(() => {
-      scrollArea.scrollTop = scrollArea.scrollHeight;
-    });
+    scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: "instant" });
+  }
+  function isNearEnd() {
+    return scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight < 120;
+  }
+  function renderReplyProgress() {
+    const follow = isNearEnd();
+    renderMessages();
+    updateComposer();
+    if (follow) scrollToEnd();
   }
   function modelKey(model) {
     return JSON.stringify([model.provider, model.model]);
   }
-  function selectedModel() {
-    const conversation = currentConversation();
+  function selectedModel(conversation = currentConversation()) {
     const choice = conversation?.provider ? conversation : defaultModel;
     return models.find((model) => choice && model.provider === choice.provider && model.model === choice.model) || null;
   }
@@ -1107,7 +1254,7 @@
   $("#reload-models").addEventListener("click", loadModels);
   stopButton.addEventListener("click", () => {
     const flight = pending.get(activeId);
-    if (flight) {
+    if (flight && !flight.stopped && !flight.finished) {
       flight.stopped = true;
       flight.controller.abort();
       updateComposer();
@@ -1162,7 +1309,7 @@
           if (line(text)) return;
         }
         if (buffer.length + eventSize > 1024 * 1024) throw new Error("\u56DE\u590D\u4E8B\u4EF6\u8FC7\u5927\uFF0C\u5DF2\u505C\u6B62\u63A5\u6536\u3002");
-        if (done) throw new Error("\u8FDE\u63A5\u610F\u5916\u4E2D\u65AD\uFF0C\u56DE\u590D\u672A\u5B8C\u6574\u751F\u6210\u3002");
+        if (done) throw new ApiError("\u8FDE\u63A5\u610F\u5916\u4E2D\u65AD\uFF0C\u56DE\u590D\u672A\u5B8C\u6574\u63A5\u6536\u3002", "stream_incomplete");
       }
     } finally {
       await reader.cancel().catch(() => {
@@ -1174,61 +1321,144 @@
     if (activeId !== id || streamFrame !== null) return;
     streamFrame = requestAnimationFrame(() => {
       streamFrame = null;
-      const follow = scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight < 120;
-      renderMessages();
+      const follow = isNearEnd();
+      renderPendingReply();
       updateComposer();
-      if (follow) scrollArea.scrollTop = scrollArea.scrollHeight;
+      if (follow) scrollToEnd();
     });
   }
-  async function requestReply(conversation, { regenerate = false } = {}) {
-    const id = conversation.id;
-    if (conversationBusy(conversation)) return;
-    const chosen = selectedModel();
-    if (!chosen) {
+  function validateChatContext(messages) {
+    const encoder = new TextEncoder();
+    const bytes = messages.reduce((size, message) => size + encoder.encode(message.content).byteLength, 0);
+    if (messages.length <= 200 && bytes <= 240 * 1024) return true;
+    formError = "\u5BF9\u8BDD\u5185\u5BB9\u8FC7\u957F\uFF0C\u8BF7\u65B0\u5EFA\u5BF9\u8BDD\u7EE7\u7EED\u3002";
+    updateComposer();
+    return false;
+  }
+  function regenerateReply(conversation) {
+    const questionId = latestQuestionId(conversation);
+    if (!questionId) return;
+    const messages = conversation.messages;
+    const last = messages.at(-1);
+    const previousAnswer = last?.role === "assistant" ? last : void 0;
+    const context = previousAnswer ? messages.slice(0, -1) : messages;
+    if (!validateChatContext(context)) return;
+    const model = selectedModel(conversation);
+    if (!model) {
       formError = "\u5F53\u524D\u6A21\u578B\u4E0D\u53EF\u7528\uFF0C\u8BF7\u5207\u6362\u6A21\u578B\u540E\u91CD\u8BD5\u3002";
       updateComposer();
       return;
     }
-    const lastRole = conversation.messages.at(-1)?.role;
-    if (lastRole !== (regenerate ? "assistant" : "user")) return;
-    const question = regenerate ? conversation.messages.at(-2) : conversation.messages.at(-1);
-    if (!question || regenerate && !question.id) return;
-    const flight = { controller: new AbortController(), text: "", reasoning: "", regenerate, stopped: false };
+    return requestReply(conversation, { questionId, previousAssistantId: previousAnswer?.id, model, requestId: makeId(), error: "" });
+  }
+  function reconcileUnconfirmedReply(conversation, request, error, refreshed, retry) {
+    const { id } = conversation;
+    const queueRejected = error.status === 503 && error.code === "unavailable" && error.message === "\u6A21\u578B\u4EFB\u52A1\u961F\u5217\u5DF2\u6EE1\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002";
+    const existingRequest = retry && error.status === 409 && error.code === "conflict" && error.message === "\u8BE5\u8BF7\u6C42\u5DF2\u5904\u7406\u6216\u6B63\u5728\u751F\u6210\uFF0C\u8BF7\u5237\u65B0\u5386\u53F2\u540E\u91CD\u8BD5\u3002";
+    const recorded = queueRejected || existingRequest;
+    const rejected = !retry && error.status !== void 0 && error.status >= 400 && error.status < 500;
+    if (!recorded && !rejected) return;
+    if (recorded && (!refreshed || isGenerating(conversation))) return;
+    const answer = conversation.messages.at(-1);
+    if ("content" in request) {
+      const question = conversation.messages.at(-2);
+      const completedDuringRetry = existingRequest && answer?.state === "completed";
+      const saved = refreshed && question?.role === "user" && question.id && question.content === request.content && question.parent_id === request.parentId && answer?.role === "assistant" && answer.parent_id === question.id && (completedDuringRetry || answer.state === "failed" || answer.state === "interrupted");
+      if (saved) {
+        clearConfirmedSend(id, request);
+        if (!completedDuringRetry) {
+          failures.set(id, existingRequest ? answer.error || "\u751F\u6210\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u3002" : request.error);
+        }
+      } else if (recorded) {
+        pendingSends.delete(id);
+        notices.set(id, "\u539F\u8BF7\u6C42\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u5728\u5386\u53F2\u4E2D\u67E5\u770B\u3002");
+      } else {
+        request.rejected = true;
+      }
+    } else {
+      pendingRegenerates.delete(id);
+      const completedDuringRetry = existingRequest && answer?.role === "assistant" && answer.state === "completed" && answer.id !== request.previousAssistantId;
+      if (!completedDuringRetry && latestQuestionId(conversation) === request.questionId) {
+        failures.set(id, existingRequest ? "\u751F\u6210\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u3002" : request.error);
+      }
+    }
+  }
+  async function requestReply(conversation, request, retry = false) {
+    const id = conversation.id;
+    if (conversationBusy(conversation)) return;
+    request.error = "";
+    if ("content" in request) pendingSends.set(id, request);
+    else pendingRegenerates.set(id, request);
+    const { provider, model } = request.model;
+    const requestBody = {
+      provider,
+      model,
+      stream: true,
+      conversation_id: id,
+      request_id: request.requestId,
+      ..."content" in request ? { content: request.content } : { regenerate_message_id: request.questionId }
+    };
+    const epoch = authEpoch;
+    const flight = {
+      controller: new AbortController(),
+      text: "",
+      reasoning: "",
+      regenerate: "questionId" in request,
+      stopped: false,
+      finished: false
+    };
     pending.set(id, flight);
     failures.delete(id);
     notices.delete(id);
-    formError = "";
-    conversation.provider = chosen.provider;
-    conversation.model = chosen.model;
-    render();
-    scrollToEnd();
+    conversationErrors.delete(id);
+    if (activeId === id) formError = "";
+    if (!retry) {
+      conversation.provider = provider;
+      conversation.model = model;
+    }
+    if (activeId === id) {
+      render();
+      scrollToEnd();
+    } else renderList();
+    let savedFlightError = "";
+    let responseError;
     try {
       const response = await fetch(`${apiBase}/api/chat`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", "X-Chat-Request": "1" },
-        body: JSON.stringify({
-          provider: chosen.provider,
-          model: chosen.model,
-          stream: true,
-          conversation_id: id,
-          request_id: makeId(),
-          ...regenerate && question.id ? { regenerate_message_id: question.id } : { content: question.content }
-        }),
+        body: JSON.stringify(requestBody),
         signal: flight.controller.signal
       });
+      if (epoch !== authEpoch) throw new ApiError("\u8D26\u53F7\u5DF2\u5207\u6362\u3002", "session_changed", response.status);
       if (!response.ok) {
         const data = errorPayload(await response.json().catch(() => null));
-        if (data?.code === "unauthenticated") signedOut("\u767B\u5F55\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
-        throw new Error(typeof data?.error === "string" ? data.error : "\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+        if (epoch !== authEpoch) throw new ApiError("\u8D26\u53F7\u5DF2\u5207\u6362\u3002", "session_changed", response.status);
+        if (data.code === "unauthenticated") signedOut("\u767B\u5F55\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+        responseError = new ApiError(data.error || "\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002", data.code || "request_failed", response.status);
+        throw responseError;
       }
       await readEvents(response, (event, data) => {
+        if (epoch !== authEpoch || !conversations.includes(conversation)) return true;
         if (event === "meta") {
           if (typeof data.user_message_id !== "string" || typeof data.assistant_message_id !== "string") throw new Error("\u56DE\u590D\u6D88\u606F ID \u5F02\u5E38\u3002");
-          question.id = data.user_message_id;
           flight.assistantId = data.assistant_message_id;
+          if ("content" in request) {
+            clearConfirmedSend(id, request);
+            if (!retry && !conversation.messages.some((message) => message.id === data.user_message_id)) {
+              conversation.messages.push({ id: data.user_message_id, role: "user", state: "completed", content: request.content });
+            }
+          } else if (pendingRegenerates.get(id) === request) {
+            pendingRegenerates.delete(id);
+          }
+          if (activeId === id) renderReplyProgress();
         }
-        if (event === "error") throw new Error(typeof data.error === "string" ? data.error : "\u751F\u6210\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+        if (event === "error") {
+          throw new ApiError(
+            typeof data.error === "string" ? data.error : "\u751F\u6210\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5\u3002",
+            typeof data.code === "string" ? data.code : "generation_failed"
+          );
+        }
         if (event === "delta") {
           if (typeof data.text !== "string") throw new Error("\u56DE\u590D\u683C\u5F0F\u5F02\u5E38\u3002");
           flight.text += data.text;
@@ -1241,72 +1471,112 @@
         }
         if (event === "done") {
           if (typeof data.finish_reason !== "string" || !["stop", "length", "refusal", "other"].includes(data.finish_reason)) throw new Error("\u56DE\u590D\u7ED3\u675F\u72B6\u6001\u5F02\u5E38\u3002");
-          if (!conversations.some((item) => item.id === id)) return true;
+          if (!flight.assistantId || data.assistant_message_id !== flight.assistantId) throw new Error("\u56DE\u590D\u6D88\u606F ID \u5F02\u5E38\u3002");
           if (!flight.text.trim() && data.finish_reason !== "refusal") throw new Error("\u6CA1\u6709\u6536\u5230\u6709\u6548\u56DE\u590D\uFF0C\u8BF7\u91CD\u8BD5\u3002");
-          const reply = { id: typeof data.assistant_message_id === "string" ? data.assistant_message_id : flight.assistantId, state: "completed", role: "assistant", content: flight.text || "\u6A21\u578B\u62D2\u7EDD\u56DE\u7B54\u6B64\u95EE\u9898\u3002", reasoning: flight.reasoning, truncated: data.truncated === true };
-          if (regenerate) conversation.messages[conversation.messages.length - 1] = reply;
-          else conversation.messages.push(reply);
+          flight.finished = true;
+          if (!retry) {
+            const reply = { id: flight.assistantId, state: "completed", role: "assistant", content: flight.text || "\u6A21\u578B\u62D2\u7EDD\u56DE\u7B54\u6B64\u95EE\u9898\u3002", reasoning: flight.reasoning, truncated: data.truncated === true };
+            if (flight.regenerate && conversation.messages.at(-1)?.role === "assistant") conversation.messages[conversation.messages.length - 1] = reply;
+            else conversation.messages.push(reply);
+          }
+          if (activeId === id) updateComposer();
           return true;
         }
         return false;
       });
     } catch (error) {
-      if (!conversations.some((item) => item.id === id)) return;
-      if (!regenerate && (flight.text.trim() || flight.reasoning.trim())) {
-        conversation.messages.push({ role: "assistant", content: flight.text, reasoning: flight.reasoning, interrupted: true });
+      if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
+      if (!flight.stopped) {
+        if (flight.assistantId) savedFlightError = error instanceof TypeError ? "\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF0C\u8BF7\u5237\u65B0\u5BF9\u8BDD\u786E\u8BA4\u56DE\u590D\u72B6\u6001\u3002" : errorMessage(error);
+        else request.error = unsavedFailureMessage(error);
       }
-      if (flight.stopped) notices.set(id, regenerate ? "\u5DF2\u505C\u6B62\uFF0C\u539F\u56DE\u590D\u5DF2\u4FDD\u7559\u3002" : "\u5DF2\u505C\u6B62\u751F\u6210\u3002");
-      else failures.set(id, error instanceof TypeError ? "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u540E\u7AEF\u670D\u52A1\u53EF\u7528\u3002" : errorMessage(error));
     } finally {
-      if (pending.get(id) === flight) pending.delete(id);
-      if (currentUser && conversations.includes(conversation)) {
-        try {
-          await refreshConversation(conversation);
-        } catch (error) {
-          historyError = errorMessage(error);
+      if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
+      let refreshed = false;
+      try {
+        refreshed = await refreshConversation(conversation) === true;
+      } catch (error) {
+        if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
+        recordConversationError(id, error);
+        if (!retry && !flight.regenerate && !flight.finished && flight.assistantId && (flight.text || flight.reasoning)) {
+          conversation.messages.push({ role: "assistant", content: flight.text, reasoning: flight.reasoning, interrupted: true });
         }
       }
-      render();
+      if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
+      if (pending.get(id) === flight) pending.delete(id);
+      if (responseError && !flight.stopped) reconcileUnconfirmedReply(conversation, request, responseError, refreshed, retry);
+      scheduleConversationPoll(conversation);
+      const reply = flight.assistantId ? conversation.messages.find((message) => message.id === flight.assistantId) : void 0;
+      if (flight.stopped && reply?.state !== "completed") {
+        notices.set(id, flight.assistantId ? "\u5DF2\u505C\u6B62\u63A5\u6536\u56DE\u590D\u3002" : "\u5DF2\u505C\u6B62\u63A5\u6536\uFF0C\u4FDD\u5B58\u72B6\u6001\u5F85\u786E\u8BA4\uFF0C\u53EF\u4F7F\u7528\u539F\u8BF7\u6C42\u91CD\u8BD5\u3002");
+      }
+      if (savedFlightError && reply?.state !== "completed" && !isGenerating(conversation) && !conversation.messages.at(-1)?.error) {
+        failures.set(id, savedFlightError);
+      }
       if (activeId === id) {
-        scrollToEnd();
-        if (!prompt.disabled) prompt.focus();
+        const follow = isNearEnd();
+        renderReplyProgress();
+        if (follow && !prompt.disabled && document.activeElement === document.body && window.getSelection()?.isCollapsed && $("#account-page").hidden) {
+          prompt.focus({ preventScroll: true });
+        }
       }
     }
   }
   $("#chat-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = prompt.value.trim();
-    if (!text || prompt.disabled || !selectedModel()) return;
+    const raw = prompt.value;
+    const text = raw.trim();
     let conversation = currentConversation();
-    const nextMessages = modelHistory([...conversation?.messages || [], { role: "user", content: text }]);
-    if (nextMessages.length > 200 || new TextEncoder().encode(JSON.stringify({ messages: nextMessages })).length > 240 * 1024) {
-      formError = "\u5BF9\u8BDD\u5185\u5BB9\u8FC7\u957F\uFF0C\u8BF7\u65B0\u5EFA\u5BF9\u8BDD\u7EE7\u7EED\u3002";
-      updateComposer();
-      return;
-    }
+    const existing = matchingPendingSend(conversation?.id ?? null, text);
+    const model = selectedModel(conversation);
+    if (!text || prompt.disabled || !model || existing && !existing.rejected || conversation && conversationBusy(conversation) || !conversation && (activeId !== null || creatingConversation)) return;
+    if (!validateChatContext([...conversation?.messages || [], { content: text }])) return;
+    const epoch = authEpoch;
     if (!conversation) {
-      sendButton.disabled = true;
+      const creation = { draftVersion: newDraftVersion };
+      creatingConversation = creation;
+      formError = "";
+      createError = "";
+      updateComposer();
       try {
         const data = await api("/api/conversations", { title: text.replace(/\s+/g, " ").slice(0, 28) });
+        if (epoch !== authEpoch || !currentUser) return;
         conversation = { ...data.conversation, messages: [], loaded: true };
       } catch (error) {
-        formError = errorMessage(error);
-        updateComposer();
+        if (epoch === authEpoch && creation.draftVersion === newDraftVersion && errorCode(error) !== "session_changed") {
+          createError = error instanceof TypeError ? "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u786E\u8BA4\u540E\u7AEF\u670D\u52A1\u53EF\u7528\u3002" : errorMessage(error);
+        }
         return;
+      } finally {
+        if (creatingConversation === creation) {
+          creatingConversation = null;
+          updateComposer();
+        }
       }
       conversations.unshift(conversation);
-      activeId = conversation.id;
-      updateConversationUrl(activeId);
-      drafts.delete("new");
+      if (creation.draftVersion === newDraftVersion) {
+        drafts.delete("new");
+        if (activeId === null) {
+          activeId = conversation.id;
+          updateConversationUrl(activeId);
+        }
+      }
     }
-    conversation.messages.push({ role: "user", content: text });
-    prompt.value = "";
-    drafts.delete(activeId);
-    resizePrompt();
-    requestReply(conversation);
+    const send = {
+      content: text,
+      raw,
+      model,
+      requestId: makeId(),
+      error: "",
+      parentId: conversation.messages.at(-1)?.id ?? conversation.current_message_id
+    };
+    drafts.set(conversation.id, raw);
+    requestReply(conversation, send);
   });
   prompt.addEventListener("input", () => {
     formError = "";
+    if (activeId === null) createError = "";
+    drafts.set(activeId || "new", prompt.value);
     resizePrompt();
     updateComposer();
   });
@@ -1318,7 +1588,37 @@
   });
   retryButton.addEventListener("click", () => {
     const conversation = currentConversation();
-    if (conversation) requestReply(conversation, { regenerate: conversation.messages.at(-1)?.role === "assistant" });
+    if (activeId !== null && !conversation?.loaded && conversationErrors.has(activeId)) {
+      void switchConversation(activeId, true);
+      return;
+    }
+    if (activeId === null || !conversation) {
+      if (activeId === null && createError && prompt.value.trim()) $("#chat-form").requestSubmit();
+      return;
+    }
+    if (!conversationBusy(conversation)) {
+      const unsent = matchingPendingSend(conversation.id);
+      if (unsent) {
+        if (unsent.rejected) {
+          $("#chat-form").requestSubmit();
+          return;
+        }
+        unsent.raw = prompt.value;
+        drafts.set(conversation.id, prompt.value);
+        void requestReply(conversation, unsent, true);
+        return;
+      }
+      const regenerate = matchingPendingRegenerate(conversation);
+      if (regenerate) {
+        void requestReply(conversation, regenerate, true);
+        return;
+      }
+    }
+    if (conversationErrors.has(conversation.id)) {
+      void switchConversation(conversation.id, true);
+      return;
+    }
+    void regenerateReply(conversation);
   });
   $("#new-chat").addEventListener("click", newConversation);
   window.addEventListener("popstate", () => {

@@ -77,7 +77,26 @@ export interface PendingReply {
   reasoning: string;
   regenerate: boolean;
   stopped: boolean;
+  finished: boolean;
   assistantId?: string;
+}
+
+export interface PendingSend {
+  content: string;
+  raw: string;
+  requestId: string;
+  parentId: string | null;
+  model: Model;
+  error: string;
+  rejected?: boolean;
+}
+
+export interface PendingRegenerate {
+  questionId: string;
+  previousAssistantId: string | undefined;
+  requestId: string;
+  model: Model;
+  error: string;
 }
 
 export interface ReasoningView {
