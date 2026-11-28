@@ -135,7 +135,12 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
   };
   route("GET", "/api/models", [&models](const auto &, const auto &, const auto &response) {
     Json items = Json::array();
-    for (const auto &model : models.List()) items.push_back({{"provider", model.provider}, {"model", model.model}});
+    for (const auto &model : models.List())
+    {
+      Json item{{"provider", model.provider}, {"model", model.model}};
+      if (model.supports_reasoning_effort) item["reasoning_efforts"] = {"high", "max"};
+      items.push_back(std::move(item));
+    }
     response->Reply("200 OK", Json{{"models", items}}.dump());
   });
   route("POST", "/api/conversations", [&history](const auto &context, const auto &request, const auto &response) {
@@ -191,10 +196,18 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
     response->Reply("200 OK", Json{{"items", items}}.dump());
   });
   route("POST", "/api/chat", [&history, &models, model_tasks](const auto &context, const auto &http_request, const auto &response) {
-    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id"});
+    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id", "reasoning_effort"});
     if (body.contains("content") == body.contains("regenerate_message_id")) throw std::invalid_argument("content");
     auto client = models.Find(detail::String(body, "provider"), detail::String(body, "model"));
     if (!client) throw std::invalid_argument("model");
+    ai::ChatRequest request;
+    if (body.contains("reasoning_effort"))
+    {
+      const auto effort = detail::String(body, "reasoning_effort");
+      if (!client->SupportsReasoningEffort() || (effort != "high" && effort != "max"))
+        throw std::invalid_argument("reasoning_effort");
+      request.reasoning_effort = effort == "max" ? ai::ReasoningEffort::Max : ai::ReasoningEffort::High;
+    }
     auto stream = body.value("stream", true);
     auto conversation = detail::Id(body, "conversation_id");
     auto request_id = detail::String(body, "request_id");
@@ -237,7 +250,6 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
       }
       return;
     }
-    ai::ChatRequest request;
     try
     {
       if (FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))

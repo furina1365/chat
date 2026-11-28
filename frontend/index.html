@@ -160,12 +160,23 @@
               <p id="status" role="status" aria-live="polite"></p><button id="retry" class="text-button" type="button" hidden>重试</button>
             </div>
             <div class="model-picker">
-              <button id="model-select" type="button" aria-label="选择模型" aria-haspopup="listbox"
+              <button id="model-select" type="button" aria-label="选择模型和思考强度" aria-haspopup="dialog"
                 popovertarget="model-menu" aria-controls="model-menu" aria-expanded="false" disabled>
                 <span id="model-label">正在加载模型…</span>
                 <svg class="model-chevron" aria-hidden="true"><use href="#icon-chevron-down" /></svg>
               </button>
-              <div class="model-menu" id="model-menu" popover="auto" role="listbox" aria-label="选择模型"></div>
+              <div class="model-menu" id="model-menu" popover="auto" role="dialog" aria-label="模型和思考强度">
+                <fieldset class="model-menu-group" id="model-options">
+                  <legend>模型</legend>
+                </fieldset>
+                <fieldset class="model-menu-group effort-options" id="effort-options" hidden>
+                  <legend>思考强度</legend>
+                  <div class="effort-choices">
+                    <label><input type="radio" name="reasoning-effort" value="high">High</label>
+                    <label><input type="radio" name="reasoning-effort" value="max">Max</label>
+                  </div>
+                </fieldset>
+              </div>
               <button class="icon-button" id="reload-models" type="button" title="重新加载模型" aria-label="重新加载模型"
                 hidden><svg>
                   <use href="#icon-retry" />

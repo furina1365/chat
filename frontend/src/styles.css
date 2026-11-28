@@ -1026,7 +1026,7 @@ textarea::placeholder {
   position: fixed;
   inset: auto;
   width: max-content;
-  min-width: 200px;
+  min-width: min(200px, calc(100vw - 24px));
   max-width: min(320px, calc(100vw - 24px));
   max-height: 360px;
   margin: 0;
@@ -1040,6 +1040,25 @@ textarea::placeholder {
   box-shadow: 0 12px 36px #302f2c18, 0 2px 6px #302f2c0d;
 }
 
+.model-menu-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.model-menu-group legend {
+  padding: 4px 12px;
+  color: var(--icon);
+  font-size: 12px;
+}
+
+.model-option,
+.effort-choices label {
+  position: relative;
+  border-radius: 8px;
+}
+
 .model-option {
   display: flex;
   align-items: center;
@@ -1048,16 +1067,26 @@ textarea::placeholder {
   width: 100%;
   min-height: 40px;
   padding: 8px 12px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
   text-align: left;
 }
 
-.model-option:hover,
-.model-option:focus-visible {
+.model-option:hover {
   background: #f4f4f2;
-  outline: none;
+}
+
+.model-menu input[type="radio"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.model-menu label:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .model-option-name {
@@ -1076,8 +1105,43 @@ textarea::placeholder {
   color: #3478d4;
 }
 
-.model-option[aria-selected="true"] svg {
+.model-option:has(input:checked) svg {
   visibility: visible;
+}
+
+.effort-options {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.effort-options legend {
+  width: 100%;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.effort-choices {
+  display: flex;
+  gap: 4px;
+  padding: 0 4px 4px;
+}
+
+.effort-choices label {
+  flex: 1;
+  display: grid;
+  min-height: 40px;
+  place-items: center;
+  color: var(--icon-hover);
+  font-size: 13px;
+}
+
+.effort-choices label:hover {
+  background: #f4f4f2;
+}
+
+.effort-choices label:has(input:checked) {
+  background: var(--icon-surface);
+  font-weight: 600;
 }
 
 .streaming > .message-content> :last-child::after {

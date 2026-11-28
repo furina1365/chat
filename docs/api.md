@@ -58,7 +58,7 @@
 
 | 接口 | 输入 | 成功结果 |
 | --- | --- | --- |
-| GET /api/models | 无 | models，仅 provider、model |
+| GET /api/models | 无 | models，每项包含 provider、model，支持思考强度的模型另有 reasoning_efforts |
 | POST /api/conversations | title | 201，conversation |
 | GET /api/conversations | 可选 limit（1–100）、before_updated_at、before_id | items、next；按更新时间、ID 降序 |
 | GET /api/conversation | id | conversation、messages（当前分支按发送顺序） |
@@ -67,7 +67,9 @@
 | POST /api/conversation/delete | conversation_id | ok，删除消息和请求幂等记录 |
 | GET /api/conversation/messages | conversation_id，可选 limit（1–500）、before | items、next_before；包含保留的旧分支 |
 | GET /api/conversation/context | conversation_id、last_message_id | items，沿 parent_id 读取上下文 |
-| POST /api/chat | conversation_id、request_id、provider、model、stream 可选；content 与 regenerate_message_id 二选一 | 流式 SSE 或普通 JSON |
+| POST /api/chat | conversation_id、request_id、provider、model；stream、reasoning_effort 可选；content 与 regenerate_message_id 二选一 | 流式 SSE 或普通 JSON |
+
+`GET /api/models` 为支持思考强度的 DeepSeek Chat Completions 模型返回 `reasoning_efforts: ["high", "max"]`。对应聊天请求可传 `reasoning_effort: "high"` 或 `"max"`，缺省为 `"high"`，两档均启用思考模式。给其他模型传该字段，或使用该模型未声明的档位，返回 `400 invalid_request`。
 
 聊天请求的 request_id 为 1–80 位字母、数字、下划线或连字符。相同对话内同一 request_id 和相同问题只启动一次生成，内容不同时返回 409。已完成的重试返回已保存的回复；生成中的重试返回 409。失败或中断后重新生成使用新的 request_id。每个对话同时最多生成一条回复，不跨模型调用持有事务。
 

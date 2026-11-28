@@ -149,7 +149,7 @@ namespace ai
   {
     std::vector<ModelInfo> result;
     for (const auto &item : models_)
-      result.push_back({item.first.first, item.first.second});
+      result.push_back({item.first.first, item.first.second, item.second->SupportsReasoningEffort()});
     return result;
   }
   const ModelClient *ModelManager::Find(const std::string &provider, const std::string &model) const

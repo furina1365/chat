@@ -1,5 +1,5 @@
 import { $, formInput } from './dom';
-import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningView, Registration, User } from './types';
+import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningEffort, ReasoningView, Registration, User } from './types';
 import type * as MarkdownRenderer from './markdown';
 
 declare global {
@@ -19,10 +19,14 @@ const status = $('#status');
 const retryButton = $('#retry');
 const modelSelect = $('#model-select');
 const modelMenu = $('#model-menu');
+const modelOptions = $('#model-options');
+const effortOptions = $('#effort-options');
+const effortInputs = effortOptions.querySelectorAll<HTMLInputElement>('input');
 const stopButton = $('#stop');
 let models: Model[] = [];
 let modelError = '';
 let defaultModel: Model | null = null;
+let defaultReasoningEffort: ReasoningEffort | undefined;
 let streamFrame: number | null = null;
 let streamElement: HTMLElement | null = null;
 const scrollArea = $('#conversation-scroll');
@@ -164,7 +168,7 @@ function signedOut(message = '') {
   polling.clear(); pending.clear(); pendingSends.clear(); pendingRegenerates.clear(); drafts.clear(); failures.clear(); notices.clear();
   selectingBranches.clear(); conversationErrors.clear(); conversationLoad = null;
   creatingConversation = null; createError = '';
-  conversations = []; activeId = null; models = []; defaultModel = null;
+  conversations = []; activeId = null; models = []; defaultModel = null; defaultReasoningEffort = undefined;
   prompt.value = ''; formError = ''; historyError = ''; modelError = '';
   closeAccount(false);
   $('#password-form').reset(); $('#email-form').reset(); $('#email-verify-form').reset();
@@ -1014,7 +1018,7 @@ function updateComposer() {
   stopButton.hidden = !waiting;
   stopButton.disabled = Boolean(flight?.stopped || flight?.finished);
   sendButton.disabled = prompt.disabled || !prompt.value.trim() || !chosen || Boolean(uncertainSend);
-  modelSelect.disabled = loading || unloaded || creating || waiting || selecting || !models.length;
+  modelSelect.disabled = loading || unloaded || creating || selecting || !models.length;
   if (modelSelect.disabled) closeModelMenu();
   messagesElement.setAttribute('aria-busy', String(waiting || remote || loading || (unloaded && !detailError)));
   const canRetryCreate = activeId === null && Boolean(createError && prompt.value.trim());
@@ -1075,17 +1079,29 @@ function selectedModel(conversation = currentConversation()) {
   const choice = conversation?.provider ? conversation : defaultModel;
   return models.find((model) => choice && model.provider === choice.provider && model.model === choice.model) || null;
 }
+function selectedReasoningEffort(model: Model, conversation = currentConversation()): ReasoningEffort | undefined {
+  const effort = conversation?.provider ? conversation.reasoningEffort : defaultReasoningEffort;
+  return effort && model.reasoning_efforts?.includes(effort) ? effort : model.reasoning_efforts?.[0];
+}
 function syncModelSelect() {
-  closeModelMenu();
   const chosen = selectedModel();
-  const label = chosen ? `${chosen.provider} / ${chosen.model}` :
+  const effort = chosen ? selectedReasoningEffort(chosen) : undefined;
+  const label = chosen ? `${chosen.provider} / ${chosen.model}${effort ? ` · ${effort === 'max' ? 'Max' : 'High'}` : ''}` :
     models.length ? '模型不可用' : modelError ? '模型加载失败' : '正在加载模型…';
   $('#model-label').textContent = label;
   modelSelect.title = label;
-  modelSelect.setAttribute('aria-label', `选择模型：${label}`);
-  for (const option of modelMenu.children) {
-    option.setAttribute('aria-selected', String(chosen !== null && option.getAttribute('data-key') === modelKey(chosen)));
+  modelSelect.setAttribute('aria-label', `选择模型和思考强度：${label}`);
+  const key = chosen ? modelKey(chosen) : null;
+  for (const input of modelOptions.querySelectorAll<HTMLInputElement>('input')) {
+    input.checked = input.value === key;
   }
+  effortOptions.hidden = !effort;
+  for (const input of effortInputs) {
+    input.disabled = !chosen?.reasoning_efforts?.some((option) => option === input.value);
+    input.checked = input.value === effort;
+    input.closest('label')?.toggleAttribute('hidden', input.disabled);
+  }
+  positionModelMenu();
 }
 
 function closeModelMenu() {
@@ -1097,6 +1113,12 @@ function openModelMenu() {
   if (modelSelect.disabled) return;
   modelMenu.showPopover({ source: modelSelect });
   modelSelect.setAttribute('aria-expanded', 'true');
+  positionModelMenu();
+  (modelOptions.querySelector<HTMLInputElement>('input:checked') || modelOptions.querySelector<HTMLInputElement>('input'))?.focus();
+}
+
+function positionModelMenu() {
+  if (!modelMenu.matches(':popover-open')) return;
   const trigger = modelSelect.getBoundingClientRect();
   const gap = 8;
   const above = trigger.top - gap - 12;
@@ -1106,33 +1128,37 @@ function openModelMenu() {
   const menu = modelMenu.getBoundingClientRect();
   modelMenu.style.left = `${Math.max(12, Math.min(trigger.right - menu.width, window.innerWidth - menu.width - 12))}px`;
   modelMenu.style.top = `${openAbove ? trigger.top - gap - menu.height : trigger.bottom + gap}px`;
-  (modelMenu.querySelector<HTMLElement>('[aria-selected="true"]') || modelMenu.querySelector<HTMLElement>(':scope > :first-child'))?.focus();
 }
 
 function renderModelOptions() {
-  modelMenu.replaceChildren();
+  modelOptions.querySelectorAll('label').forEach((label) => label.remove());
   for (const model of models) {
-    const option = document.createElement('button');
-    option.type = 'button';
+    const option = document.createElement('label');
     option.className = 'model-option';
-    option.setAttribute('role', 'option');
-    option.setAttribute('aria-label', `${model.provider} / ${model.model}`);
     option.title = `${model.provider} / ${model.model}`;
-    option.tabIndex = -1;
-    option.dataset.key = modelKey(model);
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'chat-model';
+    input.value = modelKey(model);
+    input.setAttribute('aria-label', option.title);
     const name = document.createElement('span');
     name.className = 'model-option-name';
-    name.textContent = model.model;
-    option.append(name, icon('check'));
-    option.addEventListener('click', () => {
+    name.textContent = option.title;
+    option.append(input, name, icon('check'));
+    input.addEventListener('change', () => {
       const conversation = currentConversation();
-      if (conversation) { conversation.provider = model.provider; conversation.model = model.model;  }
-      else defaultModel = model;
+      if (conversation) {
+        conversation.provider = model.provider;
+        conversation.model = model.model;
+        conversation.reasoningEffort = undefined;
+      } else {
+        defaultModel = model;
+        defaultReasoningEffort = undefined;
+      }
       syncModelSelect();
       updateComposer();
-      modelSelect.focus();
     });
-    modelMenu.append(option);
+    modelOptions.append(option);
   }
 }
 async function loadModels() {
@@ -1140,10 +1166,17 @@ async function loadModels() {
   try {
     const data = await api('/api/models');
     if (!Array.isArray(data.models) || !data.models.length || !data.models.every((item) =>
-      typeof item.provider === 'string' && typeof item.model === 'string')) throw new Error('没有可用模型，请检查后端配置。');
+      typeof item.provider === 'string' && typeof item.model === 'string' &&
+      (item.reasoning_efforts === undefined || (Array.isArray(item.reasoning_efforts) &&
+        item.reasoning_efforts.every((effort) => effort === 'high' || effort === 'max'))))) {
+      throw new Error('没有可用模型，请检查后端配置。');
+    }
     models = data.models;
     const defaultKey = defaultModel ? modelKey(defaultModel) : null;
-    if (!models.some((model) => modelKey(model) === defaultKey)) defaultModel = models[0] ?? null;
+    if (!models.some((model) => modelKey(model) === defaultKey)) {
+      defaultModel = models[0] ?? null;
+      defaultReasoningEffort = undefined;
+    }
     renderModelOptions();
   } catch (error) {
     if (!currentUser || errorCode(error) === 'session_changed') return;
@@ -1166,23 +1199,34 @@ modelSelect.addEventListener('keydown', (event) => {
 modelMenu.addEventListener('toggle', (event) => {
   modelSelect.setAttribute('aria-expanded', String(event.newState === 'open'));
 });
+effortOptions.addEventListener('change', (event) => {
+  if (!(event.target instanceof HTMLInputElement)) return;
+  const effort = event.target.value;
+  if (effort !== 'high' && effort !== 'max') return;
+  const conversation = currentConversation();
+  if (conversation) {
+    const model = selectedModel(conversation);
+    if (!model) return;
+    conversation.provider = model.provider;
+    conversation.model = model.model;
+    conversation.reasoningEffort = effort;
+  } else defaultReasoningEffort = effort;
+  syncModelSelect();
+});
 modelMenu.addEventListener('keydown', (event) => {
-  const options = [...modelMenu.querySelectorAll<HTMLButtonElement>(':scope > button')];
-  const index = options.findIndex(option => option === document.activeElement);
-  let next;
-  if (event.key === 'ArrowDown') next = (index + 1) % options.length;
-  else if (event.key === 'ArrowUp') next = (index - 1 + options.length) % options.length;
-  else if (event.key === 'Home') next = 0;
-  else if (event.key === 'End') next = options.length - 1;
-  else if (event.key === 'Escape' || event.key === 'Tab') {
+  if (event.key === 'Escape') {
+    event.preventDefault();
     closeModelMenu();
     modelSelect.focus();
-  }
-  if (next !== undefined) {
+  } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
     event.preventDefault();
-    options[next]?.focus();
+    event.target.click();
   }
 });
+modelMenu.addEventListener('focusout', (event) => {
+  if (event.relatedTarget instanceof Node && !modelMenu.contains(event.relatedTarget)) closeModelMenu();
+});
+window.addEventListener('resize', positionModelMenu);
 $('#reload-models').addEventListener('click', loadModels);
 stopButton.addEventListener('click', () => {
   const flight = pending.get(activeId);
@@ -1276,7 +1320,10 @@ function regenerateReply(conversation: Conversation) {
     updateComposer();
     return;
   }
-  return requestReply(conversation, { questionId, previousAssistantId: previousAnswer?.id, model, requestId: makeId(), error: '' });
+  return requestReply(conversation, {
+    questionId, previousAssistantId: previousAnswer?.id, model,
+    reasoningEffort: selectedReasoningEffort(model, conversation), requestId: makeId(), error: '',
+  });
 }
 
 function reconcileUnconfirmedReply(
@@ -1331,6 +1378,7 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
   const { provider, model } = request.model;
   const requestBody: ChatRequest = {
     provider, model, stream: true, conversation_id: id, request_id: request.requestId,
+    reasoning_effort: request.reasoningEffort,
     ...('content' in request ? { content: request.content } : { regenerate_message_id: request.questionId }),
   };
 
@@ -1345,6 +1393,7 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
   if (!retry) {
     conversation.provider = provider;
     conversation.model = model;
+    conversation.reasoningEffort = request.reasoningEffort;
   }
 
   if (activeId === id) {
@@ -1463,6 +1512,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
   if (!text || prompt.disabled || !model || (existing && !existing.rejected) || (conversation && conversationBusy(conversation))
     || (!conversation && (activeId !== null || creatingConversation))) return;
   if (!validateChatContext([...(conversation?.messages || []), { content: text }])) return;
+  const reasoningEffort = selectedReasoningEffort(model, conversation);
   const epoch = authEpoch;
   if (!conversation) {
     const creation = { draftVersion: newDraftVersion };
@@ -1495,7 +1545,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
     }
   }
   const send: PendingSend = {
-    content: text, raw, model, requestId: makeId(), error: '',
+    content: text, raw, model, reasoningEffort, requestId: makeId(), error: '',
     parentId: conversation.messages.at(-1)?.id ?? conversation.current_message_id,
   };
   drafts.set(conversation.id, raw);

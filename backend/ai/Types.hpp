@@ -40,14 +40,15 @@ struct ModelConfig
   std::size_t max_response_bytes = 4 * 1024 * 1024;
 };
 
-// 前端仅获取这两个字段，显示为 provider/model。
 struct ModelInfo
 {
   std::string provider;
   std::string model;
+  bool supports_reasoning_effort;
 };
 
 enum class Role { System, Developer, User, Assistant };
+enum class ReasoningEffort { High, Max };
 
 struct Message
 {
@@ -58,6 +59,7 @@ struct Message
 struct ChatRequest
 {
   std::vector<Message> messages;
+  std::optional<ReasoningEffort> reasoning_effort;
 };
 
 enum class FinishReason { Stop, Length, Refusal, Other };
