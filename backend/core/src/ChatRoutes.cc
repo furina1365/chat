@@ -3,12 +3,212 @@
 #include "ai/ModelManager.hpp"
 #include "history/History.hpp"
 #include "http/HttpRouter.hpp"
+#include <algorithm>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <vector>
 
 namespace chat
 {
 namespace
 {
+class LeaseRenewer
+{
+public:
+  struct Entry
+  {
+    history::UserId user = 0;
+    history::ConversationId conversation = 0;
+    history::MessageId message = 0;
+    std::shared_ptr<const std::atomic<bool>> client_cancel;
+    std::shared_ptr<std::atomic<bool>> model_cancel = std::make_shared<std::atomic<bool>>(false);
+    std::chrono::steady_clock::time_point next_renew{};
+    bool stopped = false;
+    bool renewing = false;
+    std::optional<history::Error> lost_error;
+  };
+
+  class Handle
+  {
+  public:
+    Handle(std::shared_ptr<LeaseRenewer> owner, std::shared_ptr<Entry> entry)
+        : owner_(std::move(owner)), entry_(std::move(entry)) {}
+    ~Handle() { Stop(); }
+    Handle(const Handle &) = delete;
+    Handle &operator=(const Handle &) = delete;
+
+    const std::shared_ptr<std::atomic<bool>> &modelCancel() const { return entry_->model_cancel; }
+    void Touch() { owner_->Touch(entry_); }
+    void Stop() { owner_->StopEntry(entry_); }
+    std::optional<history::Error> LostError() const { return owner_->LostError(entry_); }
+
+  private:
+    std::shared_ptr<LeaseRenewer> owner_;
+    std::shared_ptr<Entry> entry_;
+  };
+
+  explicit LeaseRenewer(history::History &history)
+      : history_(history),
+        renew_interval_(std::min(std::chrono::milliseconds(60000),
+                                 std::max(std::chrono::milliseconds(100), history.lease() / 3))),
+        retry_interval_(std::min(std::chrono::milliseconds(5000),
+                                 std::max(std::chrono::milliseconds(100), renew_interval_ / 4)))
+  {}
+
+  ~LeaseRenewer()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+      entries_.clear();
+    }
+    cv_.notify_all();
+    if (thread_.joinable())
+      thread_.join();
+  }
+
+  static std::shared_ptr<Handle> Track(const std::shared_ptr<LeaseRenewer> &self,
+                                       history::UserId user, history::ConversationId conversation,
+                                       history::MessageId message,
+                                       std::shared_ptr<const std::atomic<bool>> client_cancel)
+  {
+    auto entry = std::make_shared<Entry>();
+    entry->user = user;
+    entry->conversation = conversation;
+    entry->message = message;
+    entry->client_cancel = std::move(client_cancel);
+    entry->next_renew = std::chrono::steady_clock::now() + self->renew_interval_;
+    {
+      std::lock_guard<std::mutex> lock(self->mutex_);
+      if (!self->stopping_)
+      {
+        if (!self->started_)
+        {
+          self->started_ = true;
+          self->thread_ = std::thread([raw = self.get()] { raw->Run(); });
+        }
+        self->entries_.push_back(entry);
+      }
+    }
+    self->cv_.notify_one();
+    return std::make_shared<Handle>(self, std::move(entry));
+  }
+
+  void Touch(const std::shared_ptr<Entry> &entry)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entry->stopped)
+      entry->next_renew = std::chrono::steady_clock::now() + renew_interval_;
+  }
+
+  void StopEntry(const std::shared_ptr<Entry> &entry)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entry->stopped = true;
+    entries_.erase(std::remove(entries_.begin(), entries_.end(), entry), entries_.end());
+    done_cv_.wait(lock, [&] { return !entry->renewing; });
+  }
+
+  std::optional<history::Error> LostError(const std::shared_ptr<Entry> &entry) const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return entry->lost_error;
+  }
+
+private:
+  void Run()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;)
+    {
+      if (stopping_)
+        return;
+      if (entries_.empty())
+      {
+        cv_.wait(lock, [this] { return stopping_ || !entries_.empty(); });
+        continue;
+      }
+      auto now = std::chrono::steady_clock::now();
+      std::shared_ptr<Entry> due;
+      std::optional<std::chrono::steady_clock::time_point> earliest;
+      for (auto it = entries_.begin(); it != entries_.end();)
+      {
+        auto &entry = *it;
+        if (entry->stopped || (entry->client_cancel && entry->client_cancel->load()))
+        {
+          entry->stopped = true;
+          it = entries_.erase(it);
+          continue;
+        }
+        if (entry->next_renew <= now)
+        {
+          due = entry;
+          break;
+        }
+        if (!earliest || entry->next_renew < *earliest)
+          earliest = entry->next_renew;
+        ++it;
+      }
+      if (!due)
+      {
+        if (earliest)
+          cv_.wait_until(lock, *earliest);
+        continue;
+      }
+      due->renewing = true;
+      auto user = due->user;
+      auto conversation = due->conversation;
+      auto message = due->message;
+      lock.unlock();
+
+      auto status = history_.RenewLease(user, conversation, message);
+
+      lock.lock();
+      due->renewing = false;
+      done_cv_.notify_all();
+      if (stopping_ || due->stopped || (due->client_cancel && due->client_cancel->load()))
+      {
+        due->stopped = true;
+        entries_.erase(std::remove(entries_.begin(), entries_.end(), due), entries_.end());
+        continue;
+      }
+      if (auto *error = std::get_if<history::Error>(&status))
+      {
+        if (error->code == history::ErrorCode::Conflict ||
+            error->code == history::ErrorCode::NotFound ||
+            error->code == history::ErrorCode::InvalidRequest)
+        {
+          due->lost_error = *error;
+          due->model_cancel->store(true);
+          due->stopped = true;
+          entries_.erase(std::remove(entries_.begin(), entries_.end(), due), entries_.end());
+        }
+        else
+        {
+          due->next_renew = std::chrono::steady_clock::now() + retry_interval_;
+        }
+      }
+      else
+      {
+        due->next_renew = std::chrono::steady_clock::now() + renew_interval_;
+      }
+    }
+  }
+
+  history::History &history_;
+  std::chrono::milliseconds renew_interval_;
+  std::chrono::milliseconds retry_interval_;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_, done_cv_;
+  std::vector<std::shared_ptr<Entry>> entries_;
+  std::thread thread_;
+  bool started_ = false;
+  bool stopping_ = false;
+};
+
 const char *FinishName(ai::FinishReason reason)
 {
   switch (reason)
@@ -36,10 +236,17 @@ bool FinishIfCancelled(history::History &history, history::UserId user, history:
 
 void Generate(history::History &history, history::UserId user, history::ConversationId conversation,
               history::Turn turn, const ai::ModelClient *client, ai::ChatRequest request,
-              bool stream, const std::shared_ptr<HttpResponse> &response)
+              bool stream, const std::shared_ptr<HttpResponse> &response,
+              const std::shared_ptr<LeaseRenewer::Handle> &lease)
 {
-  if (FinishIfCancelled(history, user, conversation, turn.assistant_message.id, *response))
+  if (response->cancelToken()->load())
+  {
+    lease->Stop();
+    FinishIfCancelled(history, user, conversation, turn.assistant_message.id, *response);
     return;
+  }
+  auto model_cancel = lease->modelCancel();
+  response->SetCancelHandler([model_cancel] { model_cancel->store(true); });
   history::Completion completion;
   completion.state = history::MessageState::Failed;
   bool save_failed = false;
@@ -51,14 +258,16 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     auto started = history.SaveProgress(user, conversation, turn.assistant_message.id, {++completion.sequence, "", ""});
     if (auto *error = std::get_if<history::Error>(&started))
     {
+      lease->Stop();
       if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", error->message}}.dump(), true);
       else detail::HistoryError(response, *error);
       return;
     }
+    lease->Touch();
     if (stream) response->SendEvent("meta", Meta(conversation, turn).dump());
     auto sink = [&](const std::string &text, bool reasoning) {
       (reasoning ? completion.reasoning : completion.content) += text;
-      if (response->cancelToken()->load()) return false;
+      if (response->cancelToken()->load() || model_cancel->load()) return false;
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
       if (size > 4 * 1024 * 1024) return false;
@@ -67,21 +276,22 @@ void Generate(history::History &history, history::UserId user, history::Conversa
         auto saved = history.SaveProgress(user, conversation, turn.assistant_message.id,
             {++completion.sequence, completion.content, completion.reasoning});
         if (std::holds_alternative<history::Error>(saved)) { save_failed = true; return false; }
+        lease->Touch();
         saved_size = size;
         last_save = now;
       }
-      return !response->cancelToken()->load() && (!stream || response->SendEvent(reasoning ? "reasoning_delta" : "delta", Json{{"text", text}}.dump()));
+      return !response->cancelToken()->load() && !model_cancel->load() && (!stream || response->SendEvent(reasoning ? "reasoning_delta" : "delta", Json{{"text", text}}.dump()));
     };
     ai::Result<ai::ChatResponse> result;
     if (stream)
-      result = client->Stream(request, [&](const std::string &text) { return sink(text, false); }, response->cancelToken(), [&](const std::string &text) { return sink(text, true); });
-    else result = client->Generate(request, response->cancelToken());
+      result = client->Stream(request, [&](const std::string &text) { return sink(text, false); }, model_cancel, [&](const std::string &text) { return sink(text, true); });
+    else result = client->Generate(request, model_cancel);
     if (auto *reply = std::get_if<ai::ChatResponse>(&result))
     {
       completion.content = reply->reply;
       completion.reasoning = reply->reasoning;
       completion.finish_reason = FinishName(reply->finish_reason);
-      completion.state = response->cancelToken()->load() ? history::MessageState::Interrupted : history::MessageState::Completed;
+      completion.state = (response->cancelToken()->load() || model_cancel->load()) ? history::MessageState::Interrupted : history::MessageState::Completed;
       if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal) completion.content = "模型拒绝回答此问题。";
     }
     else
@@ -97,6 +307,17 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   {
     completion.error = "处理回复失败，请重试。";
     completion.state = history::MessageState::Failed;
+  }
+  lease->Stop();
+  if (auto lost = lease->LostError())
+  {
+    if (!response->cancelToken()->load())
+    {
+      if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", lost->message}}.dump(), true);
+      else detail::HistoryError(response, *lost);
+    }
+    std::cerr << "Generation lease lost before completion\n";
+    return;
   }
   ++completion.sequence;
   auto saved = history.Finish(user, conversation, turn.assistant_message.id, completion);
@@ -190,7 +411,8 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
     for (const auto &message : messages) items.push_back(detail::Message(message));
     response->Reply("200 OK", Json{{"items", items}}.dump());
   });
-  route("POST", "/api/chat", [&history, &models, model_tasks](const auto &context, const auto &http_request, const auto &response) {
+  auto leases = std::make_shared<LeaseRenewer>(history);
+  route("POST", "/api/chat", [&history, &models, model_tasks, leases](const auto &context, const auto &http_request, const auto &response) {
     auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id"});
     if (body.contains("content") == body.contains("regenerate_message_id")) throw std::invalid_argument("content");
     auto client = models.Find(detail::String(body, "provider"), detail::String(body, "model"));
@@ -238,6 +460,7 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
       return;
     }
     ai::ChatRequest request;
+    std::shared_ptr<LeaseRenewer::Handle> lease;
     try
     {
       if (FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
@@ -252,17 +475,19 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
         if (bytes > 240 * 1024) throw history::Error{history::ErrorCode::InvalidRequest, "对话过长，请新建对话。"};
         request.messages.push_back({message.role == history::Role::User ? ai::Role::User : ai::Role::Assistant, message.content});
       }
+      lease = LeaseRenewer::Track(leases, context.user_id, conversation, turn.assistant_message.id, response->cancelToken());
       std::function<void()> start_stream;
       if (stream)
         start_stream = [response] { response->StartStream(); };
-      if (!model_tasks([&history, user = context.user_id, conversation, turn, client, request, stream, response] {
+      if (!model_tasks([&history, user = context.user_id, conversation, turn, client, request, stream, response, lease] {
         detail::Safely(response, [&] {
-          Generate(history, user, conversation, turn, client, request, stream, response);
+          Generate(history, user, conversation, turn, client, request, stream, response, lease);
         });
       }, std::move(start_stream), response)) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
     }
     catch (...)
     {
+      if (lease) lease->Stop();
       if (!FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
         history.Finish(context.user_id, conversation, turn.assistant_message.id, {1, history::MessageState::Failed, "", "", "", "请求未开始生成，请重试。"});
       throw;

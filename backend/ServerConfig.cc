@@ -56,7 +56,7 @@ bool ReadBool(const Json &object, const char *key, bool fallback, const std::str
 
 void LoadServer(const Json &object, ServerConfig &config)
 {
-  CheckFields(object, "server", {"host", "port", "io_threads", "worker_threads", "business_threads", "business_queue_size", "model_queue_size"});
+  CheckFields(object, "server", {"host", "port", "io_threads", "worker_threads", "business_threads", "business_queue_size", "model_queue_size", "generation_lease_ms"});
   config.host = ReadString(object, "host", config.host, "server.");
   config.port = static_cast<std::uint16_t>(ReadNumber(object, "port", config.port, 1, "server.", 65535));
   config.io_threads = ReadNumber(object, "io_threads", config.io_threads, 0, "server.");
@@ -64,6 +64,8 @@ void LoadServer(const Json &object, ServerConfig &config)
   config.business_threads = ReadNumber(object, "business_threads", config.business_threads, 1, "server.", 128);
   config.business_queue_size = ReadNumber(object, "business_queue_size", config.business_queue_size, 1, "server.", 4096);
   config.model_queue_size = ReadNumber(object, "model_queue_size", config.model_queue_size, 1, "server.", 4096);
+  config.generation_lease = std::chrono::milliseconds(
+      ReadNumber(object, "generation_lease_ms", static_cast<int>(config.generation_lease.count()), 1000, "server."));
 }
 
 void LoadAuth(const Json &object, ServerConfig &config)
