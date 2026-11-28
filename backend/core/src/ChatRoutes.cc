@@ -85,11 +85,8 @@ public:
       std::lock_guard<std::mutex> lock(self->mutex_);
       if (!self->stopping_)
       {
-        if (!self->started_)
-        {
-          self->started_ = true;
+        if (!self->thread_.joinable())
           self->thread_ = std::thread([raw = self.get()] { raw->Run(); });
-        }
         self->entries_.push_back(entry);
       }
     }
@@ -132,8 +129,7 @@ private:
         continue;
       }
       auto now = std::chrono::steady_clock::now();
-      std::shared_ptr<Entry> due;
-      std::optional<std::chrono::steady_clock::time_point> earliest;
+      std::shared_ptr<Entry> earliest;
       for (auto it = entries_.begin(); it != entries_.end();)
       {
         auto &entry = *it;
@@ -143,21 +139,18 @@ private:
           it = entries_.erase(it);
           continue;
         }
-        if (entry->next_renew <= now)
-        {
-          due = entry;
-          break;
-        }
-        if (!earliest || entry->next_renew < *earliest)
-          earliest = entry->next_renew;
+        if (!earliest || entry->next_renew < earliest->next_renew)
+          earliest = entry;
         ++it;
       }
-      if (!due)
+      if (!earliest)
+        continue;
+      if (earliest->next_renew > now)
       {
-        if (earliest)
-          cv_.wait_until(lock, *earliest);
+        cv_.wait_until(lock, earliest->next_renew);
         continue;
       }
+      auto due = std::move(earliest);
       due->renewing = true;
       auto user = due->user;
       auto conversation = due->conversation;
@@ -205,7 +198,6 @@ private:
   std::condition_variable cv_, done_cv_;
   std::vector<std::shared_ptr<Entry>> entries_;
   std::thread thread_;
-  bool started_ = false;
   bool stopping_ = false;
 };
 
@@ -234,6 +226,14 @@ bool FinishIfCancelled(history::History &history, history::UserId user, history:
   return true;
 }
 
+void SendHistoryError(const std::shared_ptr<HttpResponse> &response, bool stream, const history::Error &error)
+{
+  if (stream)
+    response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", error.message}}.dump(), true);
+  else
+    detail::HistoryError(response, error);
+}
+
 void Generate(history::History &history, history::UserId user, history::ConversationId conversation,
               history::Turn turn, const ai::ModelClient *client, ai::ChatRequest request,
               bool stream, const std::shared_ptr<HttpResponse> &response,
@@ -259,8 +259,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     if (auto *error = std::get_if<history::Error>(&started))
     {
       lease->Stop();
-      if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", error->message}}.dump(), true);
-      else detail::HistoryError(response, *error);
+      SendHistoryError(response, stream, *error);
       return;
     }
     lease->Touch();
@@ -312,10 +311,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   if (auto lost = lease->LostError())
   {
     if (!response->cancelToken()->load())
-    {
-      if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", lost->message}}.dump(), true);
-      else detail::HistoryError(response, *lost);
-    }
+      SendHistoryError(response, stream, *lost);
     std::cerr << "Generation lease lost before completion\n";
     return;
   }
@@ -323,8 +319,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   auto saved = history.Finish(user, conversation, turn.assistant_message.id, completion);
   if (auto *error = std::get_if<history::Error>(&saved))
   {
-    if (stream) response->SendEvent("error", Json{{"code", "history_unavailable"}, {"error", error->message}}.dump(), true);
-    else detail::HistoryError(response, *error);
+    SendHistoryError(response, stream, *error);
     std::cerr << "Failed to save the final reply\n";
     return;
   }

@@ -577,6 +577,8 @@ def case_stale_takeover(chat, model, mysql_client, *, trigger_via_finish):
         assistant_b_id = reply_b["assistant_message_id"]
 
         if trigger_via_finish:
+            require(not sa.released.is_set(),
+                    "RenewLease cancelled Task A before Finish path could be exercised")
             sa.release.set()
         else:
             # Do NOT release upstream; RenewLease must detect takeover and abort upstream A promptly!
@@ -586,6 +588,10 @@ def case_stale_takeover(chat, model, mysql_client, *, trigger_via_finish):
         events_a = fa.result(timeout=10)
 
     event_names = [name for _, name, _ in events_a]
+    if trigger_via_finish:
+        deltas = "".join(data["text"] for _, name, data in events_a if name == "delta")
+        require(deltas == "stale-reply",
+                f"expected Finish path after stale-reply delta, got {events_a}")
     require(event_names[-1] == "error" and "done" not in event_names,
             f"stale Task A should end with error, got {events_a}")
     require(events_a[-1][2]["code"] == "history_unavailable",
@@ -606,14 +612,17 @@ def case_stale_takeover(chat, model, mysql_client, *, trigger_via_finish):
 
 
 def case_config_validation(binary, model, mysql_port, redis_port):
-    for bad in (0, -1, 500, "3000"):
+    for bad in (0, -1, 500, 999, "3000", True, 1000.5):
         with tempfile.TemporaryDirectory(prefix="chat-lease-cfg-") as directory:
             config = build_config(53499, model.server_port, mysql_port, redis_port,
                                   f"cfg:{uuid.uuid4().hex}", server_options={"generation_lease_ms": bad})
             (Path(directory) / "config.json").write_text(json.dumps(config))
             result = subprocess.run([binary], cwd=directory, env=server_env(),
                                     capture_output=True, text=True, timeout=5)
+            output = (result.stdout or "") + (result.stderr or "")
             require(result.returncode != 0, f"invalid generation_lease_ms={bad!r} unexpectedly started")
+            require("generation_lease_ms" in output,
+                    f"invalid generation_lease_ms={bad!r} failed without mentioning field: {output!r}")
     # Default config without generation_lease_ms must still start cleanly.
     with tempfile.TemporaryDirectory(prefix="chat-lease-default-") as directory:
         with socket.socket() as reservation:
