@@ -25,6 +25,8 @@ namespace ai
     if (config_.temperature) body["temperature"] = *config_.temperature;
     if (config_.top_p) body["top_p"] = *config_.top_p;
     if (config_.provider == "deepseek") body["thinking"] = {{"type", "enabled"}};
+    if (SupportsReasoningEffort())
+      body["reasoning_effort"] = request.reasoning_effort == ReasoningEffort::Max ? "max" : "high";
     return body;
   }
 

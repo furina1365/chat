@@ -58,7 +58,7 @@
 
 | 接口 | 输入 | 成功结果 |
 | --- | --- | --- |
-| GET /api/models | 无 | models，仅 provider、model |
+| GET /api/models | 无 | models，每项包含 provider、model，支持思考强度的模型另有 reasoning_efforts |
 | POST /api/conversations | title | 201，conversation |
 | GET /api/conversations | 可选 limit（1–100）、before_updated_at、before_id | items、next；按更新时间、ID 降序 |
 | GET /api/conversation | id | conversation、messages（当前分支按发送顺序） |
@@ -67,13 +67,17 @@
 | POST /api/conversation/delete | conversation_id | ok，删除消息和请求幂等记录 |
 | GET /api/conversation/messages | conversation_id，可选 limit（1–500）、before | items、next_before；包含保留的旧分支 |
 | GET /api/conversation/context | conversation_id、last_message_id | items，沿 parent_id 读取上下文 |
-| POST /api/chat | conversation_id、request_id、provider、model、stream 可选；content 与 regenerate_message_id 二选一 | 流式 SSE 或普通 JSON |
+| POST /api/chat | conversation_id、request_id、provider、model；stream、reasoning_effort 可选；content 与 regenerate_message_id 二选一 | 流式 SSE 或普通 JSON |
+
+`GET /api/models` 为支持思考强度的 DeepSeek Chat Completions 模型返回 `reasoning_efforts: ["high", "max"]`。对应聊天请求可传 `reasoning_effort: "high"` 或 `"max"`，缺省为 `"high"`，两档均启用思考模式。给其他模型传该字段，或使用该模型未声明的档位，返回 `400 invalid_request`。
 
 聊天请求的 request_id 为 1–80 位字母、数字、下划线或连字符。相同对话内同一 request_id 和相同问题只启动一次生成，内容不同时返回 409。已完成的重试返回已保存的回复；生成中的重试返回 409。失败或中断后重新生成使用新的 request_id。每个对话同时最多生成一条回复，不跨模型调用持有事务。
 
-流式请求获得模型队列名额后立即返回 `200` 和 SSE 注释 `: connected`。队列满时返回 JSON `503`。SSE 事件顺序为 `meta`（conversation_id、user_message_id、assistant_message_id）、`delta` / `reasoning_delta`（text）、`done`（finish_reason、truncated）。失败以 `error` 结束。`done` 只在最终回复提交 MySQL 成功后发送。普通 JSON 含 reply、reasoning、finish_reason、消息 ID。重新生成在成功前保留原回答。中断或失败的新增分支仍可通过消息接口查询。
+流式请求获得模型队列名额后立即返回 `200` 和 SSE 注释 `: connected`。队列满时返回 JSON `503`。SSE 事件顺序为 `meta`（conversation_id、user_message_id、assistant_message_id）、`delta` / `reasoning_delta`（text）、`done`（finish_reason、truncated）。首段正文或思考保存后才推送。失败以 `error` 结束。上游因长度上限结束且没有正文时，已收到的思考和 `finish_reason=length` 保存在历史中。`done` 只在最终回复提交 MySQL 成功后发送。普通 JSON 含 reply、reasoning、finish_reason、消息 ID。重新生成在成功前保留原回答。中断或失败的新增分支仍可通过消息接口查询。
 
-上游流式调用超时时，SSE 的 `error` 事件以 `code` 标明原因。连接超时为 `upstream_connect_timeout`，等待上游响应体超出空闲时限为 `upstream_idle_timeout`，达到单次调用总时限为 `upstream_timeout`。历史保存超时前已收到的正文、思考和错误说明。
+原始 SSE 流、单条上游 SSE 事件、解包后的正文与思考合计大小分别计量。正文与思考合计上限为 4 MiB（UTF-8 字节）。上游流超出任一上限时发送 `error`，其 `code` 为 `generation_failed`，`error` 文本说明具体上限。历史保留已接收的合规增量，回复状态为 `failed`。
+
+上游流式调用超时时，SSE 的 `error` 事件以 `code` 标明原因。连接超时为 `upstream_connect_timeout`，等待上游响应体超出空闲时限为 `upstream_idle_timeout`，达到单次调用总时限为 `upstream_timeout`。历史保存超时前已收到的正文、思考、已知结束原因和错误说明。
 
 进度约每 250ms 或累计 32KiB 保存一次；终态通过递增 sequence 防止旧快照覆盖。生成租约默认 5 分钟（可通过 `server.generation_lease_ms` 调整），在排队与生成活跃期间定期续期，进度保存时也会续期；进程崩溃后过期的占位在读取或新请求时标为中断，旧生成不能提交覆盖新生成。进程退出或崩溃后，已提交内容保留。历史列表使用游标，期间有更新的会话可能移到更靠前位置，客户端按 ID 去重。
 

@@ -15,8 +15,10 @@ namespace ai
     ModelClient(const ModelClient &) = delete;
     ModelClient &operator=(const ModelClient &) = delete;
 
+    bool SupportsReasoningEffort() const;
+
     // 调用均阻塞调用线程且不保存会话；可并发使用同一客户端。
-    // 生成参数使用 config_ 中的后端配置，不接受对话请求覆盖。
+    // 采样和额度使用 config_ 中的后端配置。
     // 不支持的显式配置返回 UnsupportedFeature，不静默忽略。
     virtual Result<ChatResponse> Generate(
         const ChatRequest &request, const CancelToken &cancel) const;

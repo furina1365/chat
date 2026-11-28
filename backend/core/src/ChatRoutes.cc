@@ -1,6 +1,7 @@
 #include "ChatRoutes.hpp"
 #include "HttpSupport.hpp"
 #include "ai/ModelManager.hpp"
+#include "common/AssistantText.hpp"
 #include "history/History.hpp"
 #include "http/HttpRouter.hpp"
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -270,8 +272,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       if (response->cancelToken()->load() || model_cancel->load()) return false;
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
-      if (size > 4 * 1024 * 1024) return false;
-      if (now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
+      if (!saved_size || now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
       {
         auto saved = history.SaveProgress(user, conversation, turn.assistant_message.id,
             {++completion.sequence, completion.content, completion.reasoning});
@@ -292,11 +293,20 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       completion.reasoning = reply->reasoning;
       completion.finish_reason = FinishName(reply->finish_reason);
       completion.state = (response->cancelToken()->load() || model_cancel->load()) ? history::MessageState::Interrupted : history::MessageState::Completed;
-      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal) completion.content = "模型拒绝回答此问题。";
+      constexpr std::string_view refusal = "模型拒绝回答此问题。";
+      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal &&
+          completion.reasoning.size() <= kMaxAssistantTextBytes - refusal.size())
+        completion.content = refusal;
+      if (completion.state == history::MessageState::Completed && completion.content.empty() && reply->finish_reason == ai::FinishReason::Length)
+      {
+        completion.state = history::MessageState::Failed;
+        completion.error = "模型达到生成长度上限，未生成正文。";
+      }
     }
     else
     {
-      auto &error = std::get<ai::Error>(result);
+      const auto &error = std::get<ai::Error>(result);
+      if (error.finish_reason) completion.finish_reason = FinishName(*error.finish_reason);
       switch (error.code)
       {
       case ai::ErrorCode::Timeout:
@@ -361,7 +371,12 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
   };
   route("GET", "/api/models", [&models](const auto &, const auto &, const auto &response) {
     Json items = Json::array();
-    for (const auto &model : models.List()) items.push_back({{"provider", model.provider}, {"model", model.model}});
+    for (const auto &model : models.List())
+    {
+      Json item{{"provider", model.provider}, {"model", model.model}};
+      if (model.supports_reasoning_effort) item["reasoning_efforts"] = {"high", "max"};
+      items.push_back(std::move(item));
+    }
     response->Reply("200 OK", Json{{"models", items}}.dump());
   });
   route("POST", "/api/conversations", [&history](const auto &context, const auto &request, const auto &response) {
@@ -418,10 +433,18 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
   });
   auto leases = std::make_shared<LeaseRenewer>(history);
   route("POST", "/api/chat", [&history, &models, model_tasks, leases](const auto &context, const auto &http_request, const auto &response) {
-    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id"});
+    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id", "reasoning_effort"});
     if (body.contains("content") == body.contains("regenerate_message_id")) throw std::invalid_argument("content");
     auto client = models.Find(detail::String(body, "provider"), detail::String(body, "model"));
     if (!client) throw std::invalid_argument("model");
+    ai::ChatRequest request;
+    if (body.contains("reasoning_effort"))
+    {
+      const auto effort = detail::String(body, "reasoning_effort");
+      if (!client->SupportsReasoningEffort() || (effort != "high" && effort != "max"))
+        throw std::invalid_argument("reasoning_effort");
+      request.reasoning_effort = effort == "max" ? ai::ReasoningEffort::Max : ai::ReasoningEffort::High;
+    }
     auto stream = body.value("stream", true);
     auto conversation = detail::Id(body, "conversation_id");
     auto request_id = detail::String(body, "request_id");
@@ -464,7 +487,6 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
       }
       return;
     }
-    ai::ChatRequest request;
     std::shared_ptr<LeaseRenewer::Handle> lease;
     try
     {

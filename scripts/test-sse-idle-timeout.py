@@ -170,6 +170,7 @@ class ModelHandler(BaseHTTPRequestHandler):
             delta("delayed reply")
         elif case == "model-timeout":
             partial()
+            send('{"choices":[{"delta":{},"finish_reason":"length"}]}')
             while not stop.wait(0.35):
                 heartbeat()
             return
@@ -277,8 +278,33 @@ class Chat:
                 yield conversation, peer, wire, started
 
 
+def model_config(name, port, timeout):
+    return {
+        "provider": "local-test", "model": name, "api": "openai-completions",
+        "base_url": f"http://{HOST}:{port}/v1",
+        "api_key": "local-sse-regression", "timeout_ms": timeout * 1000,
+        "max_response_bytes": 16 * 1024 * 1024,
+    }
+
+
+def timeout_models(port):
+    short_idle = {"stream_idle_timeout_ms": round(UPSTREAM_IDLE_SECONDS * 1000)}
+    return [
+        model_config("long-timeout", port, IDLE_SECONDS + 25),
+        {**model_config("steady-upstream", port, IDLE_SECONDS + 25), "stream_idle_timeout_ms": 6000},
+        {**model_config("short-timeout", port, MODEL_TIMEOUT_SECONDS), **short_idle},
+        {**model_config("short-upstream-idle", port, 8), **short_idle},
+        {
+            **model_config("stalled-tls", port, 8),
+            "base_url": f"https://{HOST}:{port}/v1",
+            "connect_timeout_ms": round(CONNECT_TIMEOUT_SECONDS * 1000),
+            "stream_idle_timeout_ms": 250,
+        },
+    ]
+
+
 @contextmanager
-def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
+def chat_server(binary, model, mysql_port, redis_port, *, server_options=None, model_options=None, models=None):
     with tempfile.TemporaryDirectory(prefix="chat-sse-") as directory:
         with socket.socket() as reservation:
             reservation.bind((HOST, 0))
@@ -294,30 +320,10 @@ def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
         namespace = f"sse-test:{uuid.uuid4().hex}"
         config["auth"].update(secure_cookie=False, key_namespace=f"{namespace}:auth",
                               session_namespace=f"{namespace}:session")
-        config["models"] = []
-        for name, timeout, idle in [
-            ("long-timeout", IDLE_SECONDS + 25, None),
-            ("steady-upstream", IDLE_SECONDS + 25, 6),
-            ("short-timeout", MODEL_TIMEOUT_SECONDS, UPSTREAM_IDLE_SECONDS),
-            ("short-upstream-idle", 8, UPSTREAM_IDLE_SECONDS),
-        ]:
-            settings = {
-                "provider": "local-test", "model": name, "api": "openai-completions",
-                "base_url": f"http://{HOST}:{model.server_port}/v1",
-                "api_key": "local-sse-regression", "timeout_ms": timeout * 1000,
-                "max_response_bytes": 16 * 1024 * 1024,
-            }
-            if idle is not None:
-                settings["stream_idle_timeout_ms"] = round(idle * 1000)
-            config["models"].append(settings)
-        config["models"].append({
-            **config["models"][0],
-            "model": "stalled-tls",
-            "base_url": f"https://{HOST}:{model.server_port}/v1",
-            "timeout_ms": 8000,
-            "connect_timeout_ms": round(CONNECT_TIMEOUT_SECONDS * 1000),
-            "stream_idle_timeout_ms": 250,
-        })
+        config["models"] = models if models is not None else [
+            {**model_config(name, model.server_port, timeout), **(model_options or {})}
+            for name, timeout in [("long-timeout", IDLE_SECONDS + 25), ("short-timeout", MODEL_TIMEOUT_SECONDS)]
+        ]
         (Path(directory) / "config.json").write_text(json.dumps(config))
         env = os.environ.copy()
         # libcurl prefers the lowercase variable when both are set.
@@ -450,8 +456,9 @@ def model_timeout(chat):
             f"expected total timeout at about {MODEL_TIMEOUT_SECONDS}s, got {error} at {elapsed:.2f}s")
     require(observed[1][2]["text"] == "partial reply", "missing streamed partial reply")
     require(observed[2][2]["text"] == "partial reasoning", "missing streamed partial reasoning")
-    check_timeout_history(chat, conversation, observed)
-    return f"total timeout at {elapsed:.2f}s despite upstream heartbeats, partial reply and reasoning saved"
+    reply = check_timeout_history(chat, conversation, observed)
+    require(reply["finish_reason"] == "length", f"known finish reason was lost: {reply}")
+    return f"total timeout at {elapsed:.2f}s despite upstream heartbeats, partial reply, reasoning and finish reason saved"
 
 
 def upstream_first_byte(chat):
@@ -480,6 +487,7 @@ def check_timeout_history(chat, conversation, events):
             reply["content"] == "partial reply" and reply["reasoning"] == "partial reasoning" and
             reply["error"] == events[-1][2]["error"],
             f"expected saved partial reply, reasoning and error with released generation slot, got {view}")
+    return reply
 
 
 def upstream_idle_after_output(chat):
@@ -608,6 +616,7 @@ def run_backend(name, binary, database_ports, cases):
     with model_server() as model, chat_server(
         binary, model, *database_ports,
         server_options={"generation_lease_ms": LEASE_SECONDS * 1000, "worker_threads": 9},
+        models=timeout_models(model.server_port),
     ) as chat:
         checks = {
             "body": lambda: completed_stream(chat, "body"),

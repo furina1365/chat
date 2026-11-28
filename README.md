@@ -412,16 +412,28 @@ tar -xzf chat-binary.tar.gz
     "timeout_ms": 60000,
     "connect_timeout_ms": 10000,
     "stream_idle_timeout_ms": 60000,
-    "max_response_bytes": 4194304
+    "max_response_bytes": 4194304,
+    "max_stream_bytes": 67108864,
+    "max_sse_event_bytes": 262144
   }
 ]
 ```
 
-密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
+密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 返回服务商、模型名和可用的思考强度。采样和输出上限由模型配置管理。`temperature`、`top_p` 及输出上限缺省或为 `null` 时使用上游默认值。Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
 
-超时与大小配置必须为正整数。`timeout_ms` 限制单次上游调用的总时长，默认 60 秒。`connect_timeout_ms` 限制 DNS 解析和连接建立，默认 10 秒。`stream_idle_timeout_ms` 配置后限制连接建立到收到首个响应体字节的时间，以及后续两次收到响应体字节之间的时间。上游 SSE 心跳重置空闲计时，服务端发给浏览器的心跳维持下游连接。省略该字段时沿用连接和总时限。`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
+`provider` 为 `deepseek` 且 `api` 为 `openai-completions` 时，`deepseek-flash` 和 `deepseek-v4-pro` 支持在输入区切换 High 和 Max。缺省使用 High，两个档位都启用思考模式。DeepSeek 仍接受的 Flash 旧名称 `deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp` 同样支持该选项。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
 
-DeepSeek 长回复示例在 `models` 中配置 10 分钟总时限与 60 秒流式空闲时限。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
+超时与大小配置必须为正整数。`timeout_ms` 限制单次上游调用的总时长，默认 60 秒。`connect_timeout_ms` 限制 DNS 解析和连接建立，默认 10 秒。`stream_idle_timeout_ms` 配置后限制连接建立到收到首个响应体字节的时间，以及后续两次收到响应体字节之间的时间。上游 SSE 心跳重置空闲计时，服务端发给浏览器的心跳维持下游连接。省略该字段时沿用连接和总时限。
+
+| 大小配置 | 计量范围 | 默认值 | 最大值 |
+| --- | --- | --- | --- |
+| `max_response_bytes` | 非 SSE 上游响应体 | 4 MiB | 64 MiB |
+| `max_stream_bytes` | 上游 SSE 响应体累计字节，含事件包装、元数据和心跳 | 64 MiB | 256 MiB |
+| `max_sse_event_bytes` | 解析单条上游 SSE 事件时的缓冲 | 256 KiB | 512 KiB |
+
+正文与思考解包后合计最多 4 MiB（UTF-8 字节），与历史存储上限一致。超出任一 SSE 上限时结束生成，历史保留已接收的合规增量并记录超限原因。已有配置若使用 `max_response_bytes` 控制 SSE 流大小，可改用 `max_stream_bytes`。
+
+DeepSeek 长回复示例在 `models` 中配置 10 分钟总时限与 60 秒流式空闲时限。
 
 ```json
 {
