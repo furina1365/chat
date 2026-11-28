@@ -20,13 +20,16 @@ const retryButton = $('#retry');
 const modelSelect = $('#model-select');
 const modelMenu = $('#model-menu');
 const modelOptions = $('#model-options');
+const modelOptionsToggle = $<HTMLButtonElement>('#model-options-toggle');
 const effortOptions = $('#effort-options');
-const effortInputs = effortOptions.querySelectorAll<HTMLInputElement>('input');
+const effortControl = $('#effort-control');
+const effortSlider = $<HTMLInputElement>('#effort-slider');
 const stopButton = $('#stop');
 let models: Model[] = [];
 let modelError = '';
 let defaultModel: Model | null = null;
 let defaultReasoningEffort: ReasoningEffort | undefined;
+let choosingModel = false;
 let streamFrame: number | null = null;
 let streamElement: HTMLElement | null = null;
 const scrollArea = $('#conversation-scroll');
@@ -1089,22 +1092,38 @@ function selectedReasoningEffort(model: Model, conversation = currentConversatio
 function syncModelSelect() {
   const chosen = selectedModel();
   const effort = chosen ? selectedReasoningEffort(chosen) : undefined;
-  const label = chosen ? `${chosen.provider} / ${chosen.model}${effort ? ` · ${effort === 'max' ? 'Max' : 'High'}` : ''}` :
+  const modelLabel = chosen ? `${chosen.provider} / ${chosen.model}` :
     models.length ? '模型不可用' : modelError ? '模型加载失败' : '正在加载模型…';
-  $('#model-label').textContent = label;
+  const effortLabel = effort === 'max' ? 'Max' : 'High';
+  const label = effort ? `${modelLabel} · ${effortLabel}` : modelLabel;
+  $('#model-label').textContent = modelLabel;
+  const modelEffort = $('#model-effort-label');
+  modelEffort.hidden = !effort;
+  modelEffort.textContent = effortLabel;
   modelSelect.title = label;
   modelSelect.setAttribute('aria-label', `选择模型和思考强度：${label}`);
   const key = chosen ? modelKey(chosen) : null;
-  for (const input of modelOptions.querySelectorAll<HTMLInputElement>('input')) {
-    input.checked = input.value === key;
+  for (const option of modelOptions.querySelectorAll('button')) {
+    option.setAttribute('aria-pressed', String(option.value === key));
   }
+  modelOptions.hidden = Boolean(effort) && !choosingModel;
   effortOptions.hidden = !effort;
-  for (const input of effortInputs) {
-    input.disabled = !chosen?.reasoning_efforts?.some((option) => option === input.value);
-    input.checked = input.value === effort;
-    input.closest('label')?.toggleAttribute('hidden', input.disabled);
-  }
+  modelOptionsToggle.setAttribute('aria-expanded', String(!modelOptions.hidden));
+  modelOptionsToggle.setAttribute('aria-label', `切换模型：${modelLabel}`);
+  modelOptionsToggle.title = modelLabel;
+  $('#effort-model-label').textContent = chosen?.model ?? '';
+  $('#effort-label').textContent = effortLabel;
+  const efforts = chosen?.reasoning_efforts;
+  effortControl.hidden = choosingModel || !efforts?.includes('high') || !efforts.includes('max');
+  effortSlider.value = effort === 'max' ? '1' : '0';
+  effortSlider.setAttribute('aria-valuetext', effortLabel);
+  effortSlider.classList.toggle('max', effort === 'max');
   positionModelMenu();
+}
+
+function focusModelOption() {
+  (modelOptions.querySelector<HTMLButtonElement>('[aria-pressed="true"]') ||
+    modelOptions.querySelector<HTMLButtonElement>('button'))?.focus();
 }
 
 function closeModelMenu() {
@@ -1113,11 +1132,15 @@ function closeModelMenu() {
 }
 
 function openModelMenu() {
-  if (modelSelect.disabled) return;
+  if (modelSelect.disabled || modelMenu.matches(':popover-open')) return;
+  choosingModel = false;
+  syncModelSelect();
   modelMenu.showPopover({ source: modelSelect });
   modelSelect.setAttribute('aria-expanded', 'true');
   positionModelMenu();
-  (modelOptions.querySelector<HTMLInputElement>('input:checked') || modelOptions.querySelector<HTMLInputElement>('input'))?.focus();
+  if (effortOptions.hidden) focusModelOption();
+  else if (effortControl.hidden) modelOptionsToggle.focus();
+  else effortSlider.focus();
 }
 
 function positionModelMenu() {
@@ -1134,32 +1157,36 @@ function positionModelMenu() {
 }
 
 function renderModelOptions() {
-  modelOptions.querySelectorAll('label').forEach((label) => label.remove());
+  modelOptions.querySelectorAll('button').forEach((button) => button.remove());
   for (const model of models) {
-    const option = document.createElement('label');
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.value = modelKey(model);
     option.className = 'model-option';
     option.title = `${model.provider} / ${model.model}`;
-    const input = document.createElement('input');
-    input.type = 'radio';
-    input.name = 'chat-model';
-    input.value = modelKey(model);
-    input.setAttribute('aria-label', option.title);
     const name = document.createElement('span');
     name.className = 'model-option-name';
     name.textContent = option.title;
-    option.append(input, name, icon('check'));
-    input.addEventListener('change', () => {
+    option.append(name, icon('check'));
+    option.addEventListener('click', () => {
       const conversation = currentConversation();
-      if (conversation) {
-        conversation.provider = model.provider;
-        conversation.model = model.model;
-        conversation.reasoningEffort = undefined;
-      } else {
-        defaultModel = model;
-        defaultReasoningEffort = undefined;
+      if (option.getAttribute('aria-pressed') !== 'true') {
+        if (conversation) {
+          conversation.provider = model.provider;
+          conversation.model = model.model;
+          conversation.reasoningEffort = undefined;
+        } else {
+          defaultModel = model;
+          defaultReasoningEffort = undefined;
+        }
       }
+      choosingModel = false;
       syncModelSelect();
       updateComposer();
+      if (effortOptions.hidden) {
+        closeModelMenu();
+        modelSelect.focus();
+      } else modelOptionsToggle.focus();
     });
     modelOptions.append(option);
   }
@@ -1202,14 +1229,17 @@ modelSelect.addEventListener('keydown', (event) => {
 modelMenu.addEventListener('toggle', (event) => {
   modelSelect.setAttribute('aria-expanded', String(event.newState === 'open'));
 });
-effortOptions.addEventListener('change', (event) => {
-  if (!(event.target instanceof HTMLInputElement)) return;
-  const effort = event.target.value;
-  if (effort !== 'high' && effort !== 'max') return;
+modelOptionsToggle.addEventListener('click', () => {
+  choosingModel = !choosingModel;
+  syncModelSelect();
+  if (choosingModel) focusModelOption();
+});
+effortSlider.addEventListener('input', () => {
+  const effort = effortSlider.valueAsNumber === 1 ? 'max' : 'high';
   const conversation = currentConversation();
+  const model = selectedModel(conversation);
+  if (!model?.reasoning_efforts?.includes(effort)) return;
   if (conversation) {
-    const model = selectedModel(conversation);
-    if (!model) return;
     conversation.provider = model.provider;
     conversation.model = model.model;
     conversation.reasoningEffort = effort;
@@ -1221,13 +1251,27 @@ modelMenu.addEventListener('keydown', (event) => {
     event.preventDefault();
     closeModelMenu();
     modelSelect.focus();
-  } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
+  } else if (event.key === 'Enter' && event.target === effortSlider) {
     event.preventDefault();
-    event.target.click();
   }
 });
+modelOptions.addEventListener('keydown', (event) => {
+  const options = [...modelOptions.querySelectorAll('button')];
+  const index = options.findIndex((option) => option === event.target);
+  if (index === -1) return;
+  let next = index;
+  if (event.key === 'ArrowUp') next = (index + options.length - 1) % options.length;
+  else if (event.key === 'ArrowDown') next = (index + 1) % options.length;
+  else if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = options.length - 1;
+  else return;
+  event.preventDefault();
+  options[next]?.focus();
+});
 modelMenu.addEventListener('focusout', (event) => {
-  if (event.relatedTarget instanceof Node && !modelMenu.contains(event.relatedTarget)) closeModelMenu();
+  if (event.relatedTarget instanceof Node && event.relatedTarget !== modelSelect && !modelMenu.contains(event.relatedTarget)) {
+    closeModelMenu();
+  }
 });
 window.addEventListener('resize', positionModelMenu);
 $('#reload-models').addEventListener('click', loadModels);
