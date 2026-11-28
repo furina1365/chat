@@ -17,6 +17,18 @@ namespace ai
   {
     using Json = nlohmann::json;
     void InitCurl() { transport::InitCurl(); }
+    std::string PrefixUrl(const std::string &base, const char *endpoint)
+    {
+      auto url = std::unique_ptr<CURLU, decltype(&curl_url_cleanup)>(curl_url(), curl_url_cleanup);
+      const auto path = std::string("/beta") + endpoint;
+      char *address = nullptr;
+      if (!url || curl_url_set(url.get(), CURLUPART_URL, base.c_str(), 0) != CURLUE_OK ||
+          curl_url_set(url.get(), CURLUPART_PATH, path.c_str(), 0) != CURLUE_OK ||
+          curl_url_get(url.get(), CURLUPART_URL, &address, 0) != CURLUE_OK)
+        throw std::invalid_argument("模型地址无效");
+      return std::unique_ptr<char, decltype(&curl_free)>(address, curl_free).get();
+    }
+
     struct Transfer : ModelResponseState
     {
       const ModelConfig &config;
@@ -27,8 +39,8 @@ namespace ai
       std::unique_ptr<SseParser> parser;
 
       Transfer(const ModelConfig &settings, const CancelToken &token, const TextSink *callback,
-               const TextSink *reasoning_callback)
-          : ModelResponseState(chat::kMaxAssistantTextBytes, callback, reasoning_callback),
+               const TextSink *reasoning_callback, std::size_t text_budget)
+          : ModelResponseState(text_budget, callback, reasoning_callback),
             config(settings), cancel(token) {}
     };
 
@@ -157,6 +169,11 @@ namespace ai
          config_.model == "deepseek-v4-flash" || config_.model == "deepseek-v4-flash-vision-exp");
   }
 
+  bool ModelClient::SupportsPrefixCompletion() const
+  {
+    return SupportsReasoningEffort();
+  }
+
   Result<ChatResponse> ModelClient::Call(const ChatRequest &request, const TextSink *sink,
                                          const CancelToken &cancel, const TextSink *reasoning_sink) const
   {
@@ -168,6 +185,16 @@ namespace ai
         return Failure(ErrorCode::Cancelled, "生成已停止。");
       if (request.reasoning_effort && !SupportsReasoningEffort())
         return Failure(ErrorCode::UnsupportedFeature, "该模型不支持设置思考强度。");
+      auto text_budget = chat::kMaxAssistantTextBytes;
+      if (request.prefix)
+      {
+        if (!SupportsPrefixCompletion())
+          return Failure(ErrorCode::UnsupportedFeature, "该模型不支持继续生成。");
+        const auto saved_bytes = request.prefix->content.size() + request.prefix->reasoning.size();
+        if (saved_bytes >= text_budget)
+          return Failure(ErrorCode::ResourceLimit, "模型回复正文与思考合计超过大小限制。");
+        text_budget -= saved_bytes;
+      }
       if (sink && !*sink)
         return Failure(ErrorCode::InvalidRequest, "流式回调为空。");
       if (request.messages.empty() || request.messages.size() > 200)
@@ -193,8 +220,8 @@ namespace ai
       add_header("Content-Type: application/json");
       add_header(sink ? "Accept: text/event-stream" : "Accept: application/json");
       for (const auto &header : AuthHeaders(key)) add_header(header);
-      auto url = config.base_url + Endpoint();
-      Transfer transfer(config, cancel, sink, reasoning_sink);
+      auto url = request.prefix ? PrefixUrl(config.base_url, Endpoint()) : config.base_url + Endpoint();
+      Transfer transfer(config, cancel, sink, reasoning_sink, text_budget);
       if (sink)
       {
         auto parse_event = [this, &transfer](const SseEvent &event)
@@ -263,7 +290,8 @@ namespace ai
         ParseBody(Json::parse(transfer.body), transfer);
       if (transfer.failure)
         return with_finish_reason(std::move(*transfer.failure));
-      if (transfer.response.reply.empty() && transfer.response.finish_reason != FinishReason::Refusal
+      if (transfer.response.reply.empty() && (!request.prefix || request.prefix->content.empty()) &&
+          transfer.response.finish_reason != FinishReason::Refusal
           && transfer.response.finish_reason != FinishReason::Length)
         return with_finish_reason(Failure(ErrorCode::InvalidResponse, "模型没有返回文字回复。"));
       return std::move(transfer.response);

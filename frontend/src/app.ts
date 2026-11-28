@@ -1,5 +1,5 @@
 import { $, formInput } from './dom';
-import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningEffort, ReasoningView, Registration, User } from './types';
+import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingContinue, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningEffort, ReasoningView, Registration, User } from './types';
 import type * as MarkdownRenderer from './markdown';
 
 declare global {
@@ -32,7 +32,7 @@ let streamElement: HTMLElement | null = null;
 const scrollArea = $('#conversation-scroll');
 const pending = new Map<string | null, PendingReply>();
 const pendingSends = new Map<string, PendingSend>();
-const pendingRegenerates = new Map<string, PendingRegenerate>();
+const pendingReplyActions = new Map<string, PendingRegenerate | PendingContinue>();
 const selectingBranches = new Set<string>();
 const failures = new Map<string | null, string>();
 const notices = new Map<string | null, string>();
@@ -165,7 +165,7 @@ function signedOut(message = '') {
   ++authEpoch;
   for (const flight of pending.values()) flight.controller.abort();
   for (const timer of polling.values()) clearTimeout(timer);
-  polling.clear(); pending.clear(); pendingSends.clear(); pendingRegenerates.clear(); drafts.clear(); failures.clear(); notices.clear();
+  polling.clear(); pending.clear(); pendingSends.clear(); pendingReplyActions.clear(); drafts.clear(); failures.clear(); notices.clear();
   selectingBranches.clear(); conversationErrors.clear(); conversationLoad = null;
   creatingConversation = null; createError = '';
   conversations = []; activeId = null; models = []; defaultModel = null; defaultReasoningEffort = undefined;
@@ -661,7 +661,7 @@ function forgetConversation(id: string, message = '') {
   pending.get(id)?.controller.abort();
   pending.delete(id);
   pendingSends.delete(id);
-  pendingRegenerates.delete(id);
+  pendingReplyActions.delete(id);
   failures.delete(id);
   notices.delete(id);
   drafts.delete(id);
@@ -795,9 +795,12 @@ function latestQuestionId(conversation: Conversation): string | undefined {
   return question?.role === 'user' ? question.id : undefined;
 }
 
-function matchingPendingRegenerate(conversation: Conversation): PendingRegenerate | undefined {
-  const request = pendingRegenerates.get(conversation.id);
-  return request && request.questionId === latestQuestionId(conversation) ? request : undefined;
+function matchingPendingReplyAction(conversation: Conversation) {
+  const request = pendingReplyActions.get(conversation.id);
+  if (!request) return;
+  if ('questionId' in request) return request.questionId === latestQuestionId(conversation) ? request : undefined;
+  const last = conversation.messages.at(-1);
+  return request.answerId === last?.id && request.revision === last.continue_from ? request : undefined;
 }
 
 function conversationBusy(conversation: Conversation) {
@@ -914,6 +917,14 @@ function createMessageView(conversation: Conversation, message: Message) {
       regenerate.append('重新生成');
     }
     regenerate.addEventListener('click', () => regenerateReply(conversation));
+    if (message.continue_from) {
+      const continueButton = document.createElement('button');
+      continueButton.type = 'button';
+      continueButton.className = 'continue-button';
+      continueButton.textContent = '继续生成';
+      continueButton.addEventListener('click', () => continueReply(conversation, message));
+      actions.append(continueButton);
+    }
     actions.append(regenerate);
     const versions = replyVersionPicker(conversation, message);
     if (versions) actions.append(versions);
@@ -929,7 +940,7 @@ function createMessageView(conversation: Conversation, message: Message) {
       note.className = 'truncated-note';
       note.textContent = message.error || (interrupted
         ? message.state ? '生成已中断，以上是已收到的内容。' : '接收已中断，以上是已收到的内容。'
-        : '回复达到长度限制，可以发送“请继续”。');
+        : '回复达到长度限制。');
       article.append(note);
     }
     article.append(actions);
@@ -943,7 +954,9 @@ function renderMessages() {
   if (conversation) {
     const busy = conversationBusy(conversation);
     const last = conversation.messages.at(-1);
+    const continueId = pending.get(conversation.id)?.continueId;
     for (const message of conversation.messages) {
+      if (continueId && message.id === continueId) continue;
       let article = messageViews.get(message);
       if (!article) {
         article = createMessageView(conversation, message);
@@ -953,6 +966,11 @@ function renderMessages() {
         const regenerate = article.querySelector<HTMLButtonElement>('.regenerate-button')!;
         regenerate.hidden = message !== last;
         regenerate.disabled = busy;
+        const continuation = article.querySelector<HTMLButtonElement>('.continue-button');
+        if (continuation) {
+          continuation.hidden = message !== last;
+          continuation.disabled = busy;
+        }
         if (message.versions && message.versions.total > 1) {
           article.querySelector<HTMLButtonElement>('.reply-version-previous')!.disabled = busy || !message.versions.previous_id;
           article.querySelector<HTMLButtonElement>('.reply-version-next')!.disabled = busy || !message.versions.next_id;
@@ -977,9 +995,10 @@ function renderPendingReply() {
   streamElement?.remove();
   streamElement = null;
   const flight = pending.get(activeId);
-  if (flight?.text || flight?.reasoning) {
+  if (flight && (flight.text || flight.reasoning || flight.continueId)) {
     const article = document.createElement('article');
     article.className = 'message assistant streaming';
+    if (flight.continueId) article.dataset.messageId = flight.continueId;
     article.setAttribute('aria-label', 'AI 正在回复');
     const content = document.createElement('div');
     content.className = 'message-content';
@@ -1007,13 +1026,13 @@ function updateComposer() {
   const waiting = pending.has(activeId);
   const flight = pending.get(activeId);
   const thinking = flight?.reasoning && !flight.text;
-  const saving = Boolean(flight && !flight.assistantId && !flight.regenerate);
+  const saving = Boolean(flight && !flight.assistantId && !flight.regenerate && !flight.continueId);
   const unanswered = conversation?.messages.at(-1)?.role === 'user';
   const remote = isGenerating(conversation);
   const selecting = Boolean(conversation && selectingBranches.has(conversation.id));
   const activeUnsent = matchingPendingSend(activeId);
   const uncertainSend = activeUnsent?.rejected ? undefined : activeUnsent;
-  const activeRegenerate = !activeUnsent && conversation ? matchingPendingRegenerate(conversation) : undefined;
+  const activeReplyAction = !activeUnsent && conversation ? matchingPendingReplyAction(conversation) : undefined;
   prompt.disabled = !currentUser || loading || unloaded || creating || waiting || remote || selecting || Boolean(unanswered);
   prompt.placeholder = loading || unloaded ? '等待对话加载' : thinking ? '正在思考…' : creating ? '正在创建对话…' : saving ? '正在发送…' : waiting ? '正在等待回复…' : unanswered ? '重试上一条消息，或新建对话' : '有什么我可以帮你？';
   const chosen = selectedModel();
@@ -1028,12 +1047,13 @@ function updateComposer() {
   const canRetryLoad = Boolean(detailError);
   const canRetrySaved = !activeUnsent && (unanswered || (failures.has(activeId) && Boolean(conversation?.messages.at(-1))));
   const canResendDraft = activeUnsent?.rejected && chosen && !remote;
-  const canRetrySend = !remote && (uncertainSend || canResendDraft || activeRegenerate || canRetryCreate || canRetrySaved);
+  const canRetrySend = !remote && (uncertainSend || canResendDraft || activeReplyAction || canRetryCreate || canRetrySaved);
   retryButton.hidden = loading || creating || waiting || selecting || !(canRetryLoad || canRetrySend);
-  const retryModel = canRetrySend ? (uncertainSend ?? activeRegenerate)?.model : undefined;
-  retryButton.textContent = retryModel ? '重试原请求' : canRetryLoad && !canResendDraft ? '刷新对话' : '重试';
+  const originalRequest = canRetrySend ? uncertainSend ?? activeReplyAction : undefined;
+  const retryModel = originalRequest && 'model' in originalRequest ? originalRequest.model : undefined;
+  retryButton.textContent = originalRequest ? '重试原请求' : canRetryLoad && !canResendDraft ? '刷新对话' : '重试';
   retryButton.title = retryModel ? `使用原请求重试（${retryModel.provider} / ${retryModel.model}）` : '';
-  const error = formError || activeUnsent?.error || activeRegenerate?.error || failures.get(activeId)
+  const error = formError || activeUnsent?.error || activeReplyAction?.error || failures.get(activeId)
     || (activeId === null ? createError : detailError) || modelError || historyError;
   const notice = notices.get(activeId) || '';
   status.classList.toggle('error', Boolean(error));
@@ -1329,8 +1349,17 @@ function regenerateReply(conversation: Conversation) {
   });
 }
 
+function continueReply(conversation: Conversation, message: Message) {
+  if (!message.id || !message.continue_from || conversation.messages.at(-1) !== message) return;
+  const previous = matchingPendingReplyAction(conversation);
+  if (previous && 'answerId' in previous) return requestReply(conversation, previous, true);
+  return requestReply(conversation, {
+    answerId: message.id, revision: message.continue_from, requestId: makeId(), error: '',
+  });
+}
+
 function reconcileUnconfirmedReply(
-  conversation: Conversation, request: PendingSend | PendingRegenerate, error: ApiError,
+  conversation: Conversation, request: PendingSend | PendingRegenerate | PendingContinue, error: ApiError,
   refreshed: boolean, retry: boolean,
 ) {
   const { id } = conversation;
@@ -1363,7 +1392,12 @@ function reconcileUnconfirmedReply(
       request.rejected = true;
     }
   } else {
-    pendingRegenerates.delete(id);
+    pendingReplyActions.delete(id);
+    if ('answerId' in request) {
+      if (!refreshed) failures.set(id, request.error);
+      else if (answer?.continue_from === request.revision) formError = request.error;
+      return;
+    }
     const completedDuringRetry = existingRequest && answer?.role === 'assistant' && answer.state === 'completed'
       && answer.id !== request.previousAssistantId;
     if (!completedDuringRetry && latestQuestionId(conversation) === request.questionId) {
@@ -1372,30 +1406,34 @@ function reconcileUnconfirmedReply(
   }
 }
 
-async function requestReply(conversation: Conversation, request: PendingSend | PendingRegenerate, retry = false) {
+async function requestReply(conversation: Conversation, request: PendingSend | PendingRegenerate | PendingContinue, retry = false) {
   const id = conversation.id;
   if (conversationBusy(conversation)) return;
   request.error = '';
   if ('content' in request) pendingSends.set(id, request);
-  else pendingRegenerates.set(id, request);
-  const { provider, model } = request.model;
-  const requestBody: ChatRequest = {
-    provider, model, stream: true, conversation_id: id, request_id: request.requestId,
-    reasoning_effort: request.reasoningEffort,
-    ...('content' in request ? { content: request.content } : { regenerate_message_id: request.questionId }),
-  };
+  else pendingReplyActions.set(id, request);
+  const base = { stream: true, conversation_id: id, request_id: request.requestId };
+  const continuing = 'answerId' in request;
+  const prefix = continuing ? conversation.messages.at(-1) : undefined;
+  const requestBody: ChatRequest = continuing
+    ? { ...base, continue_message_id: request.answerId, continue_from: request.revision }
+    : {
+      ...base, provider: request.model.provider, model: request.model.model, reasoning_effort: request.reasoningEffort,
+      ...('content' in request ? { content: request.content } : { regenerate_message_id: request.questionId }),
+    };
 
   const epoch = authEpoch;
   const flight: PendingReply = {
-    controller: new AbortController(), text: '', reasoning: '',
-    regenerate: 'questionId' in request, stopped: false, finished: false,
+    controller: new AbortController(), text: prefix?.content || '', reasoning: prefix?.reasoning || '',
+    regenerate: 'questionId' in request, continueId: continuing ? request.answerId : undefined,
+    stopped: false, finished: false,
   };
   pending.set(id, flight);
   failures.delete(id); notices.delete(id); conversationErrors.delete(id);
   if (activeId === id) formError = '';
-  if (!retry) {
-    conversation.provider = provider;
-    conversation.model = model;
+  if (!retry && !continuing) {
+    conversation.provider = request.model.provider;
+    conversation.model = request.model.model;
     conversation.reasoningEffort = request.reasoningEffort;
   }
 
@@ -1426,13 +1464,18 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
       if (event === 'meta') {
         if (typeof data.user_message_id !== 'string' || typeof data.assistant_message_id !== 'string') throw new Error('回复消息 ID 异常。');
         flight.assistantId = data.assistant_message_id;
+        if (continuing && flight.assistantId !== request.answerId) throw new Error('回复消息 ID 异常。');
         if ('content' in request) {
           clearConfirmedSend(id, request);
           if (!retry && !conversation.messages.some((message) => message.id === data.user_message_id)) {
             conversation.messages.push({ id: data.user_message_id, role: 'user', state: 'completed', content: request.content });
           }
-        } else if (pendingRegenerates.get(id) === request) {
-          pendingRegenerates.delete(id);
+        } else if (pendingReplyActions.get(id) === request) {
+          pendingReplyActions.delete(id);
+        }
+        if (continuing && data.snapshot === true) {
+          flight.finished = true;
+          return true;
         }
         if (activeId === id) renderReplyProgress();
       }
@@ -1456,9 +1499,17 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
         if (!flight.text.trim() && data.finish_reason !== 'refusal') throw new Error('没有收到有效回复，请重试。');
         flight.finished = true;
         // 同一请求的回放可能来自其他分支，当前分支由历史接口更新。
-        if (!retry) {
-          const reply: Message = { id: flight.assistantId, state: 'completed', role: 'assistant', content: flight.text || '模型拒绝回答此问题。', reasoning: flight.reasoning, truncated: data.truncated === true };
-          if (flight.regenerate && conversation.messages.at(-1)?.role === 'assistant') conversation.messages[conversation.messages.length - 1] = reply;
+        if (!retry || continuing) {
+          const reply: Message = {
+            ...prefix, id: flight.assistantId, state: 'completed', role: 'assistant',
+            content: flight.text || '模型拒绝回答此问题。', reasoning: flight.reasoning,
+            finish_reason: data.finish_reason, truncated: data.truncated === true,
+            error: '', interrupted: false, continue_from: undefined,
+          };
+          const last = conversation.messages.at(-1);
+          if (continuing) {
+            if (last?.id === flight.continueId) conversation.messages[conversation.messages.length - 1] = reply;
+          } else if (flight.regenerate && last?.role === 'assistant') conversation.messages[conversation.messages.length - 1] = reply;
           else conversation.messages.push(reply);
         }
         if (activeId === id) updateComposer();
@@ -1479,7 +1530,14 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
     catch (error) {
       if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
       recordConversationError(id, error);
-      if (!retry && !flight.regenerate && !flight.finished && flight.assistantId && (flight.text || flight.reasoning)) {
+      const last = conversation.messages.at(-1);
+      if (continuing && !flight.finished && flight.assistantId && last?.id === flight.continueId) {
+        conversation.messages[conversation.messages.length - 1] = {
+          ...last, role: 'assistant', content: flight.text, reasoning: flight.reasoning, state: 'interrupted',
+          interrupted: true, error: savedFlightError, continue_from: undefined,
+        };
+      } else if (!continuing && !retry && !flight.regenerate && !flight.finished && flight.assistantId
+        && (flight.text || flight.reasoning)) {
         conversation.messages.push({ role: 'assistant', content: flight.text, reasoning: flight.reasoning, interrupted: true });
       }
     }
@@ -1590,9 +1648,9 @@ retryButton.addEventListener('click', () => {
       void requestReply(conversation, unsent, true);
       return;
     }
-    const regenerate = matchingPendingRegenerate(conversation);
-    if (regenerate) {
-      void requestReply(conversation, regenerate, true);
+    const action = matchingPendingReplyAction(conversation);
+    if (action) {
+      void requestReply(conversation, action, true);
       return;
     }
   }

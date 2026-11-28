@@ -38,11 +38,16 @@ python3 scripts/set-admin-password.py
 
 密码以 scrypt 哈希保存在 `auth.admin_password_hash`；留空时关闭管理登录。管理会话闲置一小时过期，更换密码并重启后旧管理会话失效。页面支持按用户名、邮箱或 ID 搜索、分页、修改用户名、停用/启用账号和退出用户全部设备。停用会撤销会话并阻止登录，保留对话记录。
 
-已有数据库升级需执行一次（需 ALTER 权限）：
+已有数据库在升级时按缺失的版本执行对应迁移（需 ALTER 权限）：
 
 ```bash
+# 缺少用户管理字段时执行
 mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/migrations/20261114-admin.sql
+# 升级到支持回复续写的版本时执行
+mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/migrations/20261128-continue-reply.sql
 ```
+
+旧回复沿用原有的历史回放和重新生成操作。续写需要原模型信息，从升级后生成的回复开始记录。
 
 在项目根目录构建并启动：
 

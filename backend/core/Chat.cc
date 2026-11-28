@@ -244,6 +244,11 @@ int RunChatServer(const ServerConfig &config)
     auto connection = db::Take(mysql.Acquire());
     if (std::holds_alternative<db::Error>(connection.Query("SELECT disabled FROM users LIMIT 0")))
       throw std::runtime_error("Import backend/db/migrations/20261114-admin.sql before starting");
+    if (std::holds_alternative<db::Error>(connection.Query(
+            "SELECT generation_id,model_provider,model_name,reasoning_effort FROM messages LIMIT 0")) ||
+        std::holds_alternative<db::Error>(connection.Query(
+            "SELECT replay_content_bytes,replay_reasoning_bytes,replay_finish_reason FROM turn_requests LIMIT 0")))
+      throw std::runtime_error("Import backend/db/migrations/20261128-continue-reply.sql before starting");
   }
   auth::Auth auth(mysql, redis, config.auth);
   history::History history(mysql, config.generation_lease);

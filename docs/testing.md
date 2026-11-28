@@ -370,6 +370,15 @@ python3 scripts/test-stream-size-limits.py \
 
 用例覆盖大量小事件、三种独立的 SSE 上限、文本恰好达上限时拒答和普通 JSON 的响应上限。通过聊天事件和历史查询核对成功终态、超限原因及保留的正文和思考。支持用 `--case` 选跑。[大小上限测试](../scripts/test-stream-size-limits.py)
 
+### 9.5 同一回复续写回归
+
+```bash
+python3 scripts/test-continue-reply.py \
+  --reactor build-reactor/server --proactor build-proactor/server
+```
+
+用例通过聊天接口、历史接口和模拟上游验证同一回复追加、请求重放、再次截断、失败重试、停止、切换版本、累计文本上限及租约过期后的同 ID 接管。[续写回归脚本](../scripts/test-continue-reply.py)
+
 ## 10. 执行记录模板
 
 | 项目 | 填写内容 |

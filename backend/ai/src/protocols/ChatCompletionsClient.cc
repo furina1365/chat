@@ -20,6 +20,8 @@ namespace ai
     Json messages = Json::array();
     for (const auto &message : request.messages)
       messages.push_back({{"role", RoleName(message.role)}, {"content", message.content}});
+    if (request.prefix)
+      messages.push_back({{"role", "assistant"}, {"content", request.prefix->content}, {"prefix", true}});
     body["messages"] = std::move(messages);
     if (config_.max_output_tokens) body["max_tokens"] = *config_.max_output_tokens;
     if (config_.temperature) body["temperature"] = *config_.temperature;
