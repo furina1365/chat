@@ -239,7 +239,7 @@ class Chat:
 
 
 @contextmanager
-def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
+def chat_server(binary, model, mysql_port, redis_port, *, server_options=None, model_options=None):
     with tempfile.TemporaryDirectory(prefix="chat-sse-") as directory:
         with socket.socket() as reservation:
             reservation.bind((HOST, 0))
@@ -261,6 +261,7 @@ def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
                 "base_url": f"http://{HOST}:{model.server_port}/v1",
                 "api_key": "local-sse-regression", "timeout_ms": timeout * 1000,
                 "max_response_bytes": 16 * 1024 * 1024,
+                **(model_options or {}),
             }
             for name, timeout in [("long-timeout", IDLE_SECONDS + 25), ("short-timeout", MODEL_TIMEOUT_SECONDS)]
         ]

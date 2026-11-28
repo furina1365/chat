@@ -350,6 +350,15 @@ python3 scripts/test-client-disconnect-cancel.py \
 
 用例从真实 `POST /api/chat` 发起生成，验证上游释放时延、合法半关闭、排队取消后无上游调用及队列满时的 `503`。支持用 `--case` 选跑。[断开取消测试](../scripts/test-client-disconnect-cancel.py)
 
+### 9.3 上游响应大小回归
+
+```bash
+python3 scripts/test-stream-size-limits.py \
+  --reactor build-reactor/server --proactor build-proactor/server
+```
+
+用例覆盖大量小事件、三种独立的 SSE 上限、文本恰好达上限时拒答和普通 JSON 的响应上限。通过聊天事件和历史查询核对成功终态、超限原因及保留的正文和思考。支持用 `--case` 选跑。[大小上限测试](../scripts/test-stream-size-limits.py)
+
 ## 10. 执行记录模板
 
 | 项目 | 填写内容 |

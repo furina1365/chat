@@ -1,5 +1,6 @@
 #include "history/History.hpp"
 #include "db/src/Support.hpp"
+#include "common/AssistantText.hpp"
 #include "common/Crypto.hpp"
 #include <algorithm>
 #include <set>
@@ -165,7 +166,7 @@ struct History::Impl
   }
   void Update(UserId user, ConversationId conversation, MessageId message, const Progress &progress, const Completion *completion)
   {
-    if (progress.content.size() + progress.reasoning.size() > 4 * 1024 * 1024)
+    if (progress.content.size() + progress.reasoning.size() > chat::kMaxAssistantTextBytes)
       throw Error{ErrorCode::InvalidRequest, "回复内容过大。"};
     auto connection = db::Take(mysql.Acquire());
     db::Take(connection.Begin());
