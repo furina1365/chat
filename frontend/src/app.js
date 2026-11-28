@@ -271,9 +271,7 @@
     conversationErrors.delete(conversation.id);
     Object.assign(conversation, data.conversation, { loaded: true });
     updateConversationMessages(conversation, data.messages);
-    const last = conversation.messages.at(-1);
-    if (last?.error) failures.set(conversation.id, last.error);
-    else failures.delete(conversation.id);
+    failures.delete(conversation.id);
     scheduleConversationPoll(conversation);
   }
   function isGenerating(conversation) {
@@ -989,9 +987,14 @@
       actions.append(copy);
       const regenerate = document.createElement("button");
       regenerate.className = "regenerate-button";
-      regenerate.title = "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
-      regenerate.setAttribute("aria-label", "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D");
+      const emptyFailure = message.state === "failed" && !message.content && !message.reasoning;
+      regenerate.title = emptyFailure ? "\u91CD\u65B0\u751F\u6210" : "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
+      regenerate.setAttribute("aria-label", regenerate.title);
       regenerate.append(icon("retry"));
+      if (emptyFailure) {
+        regenerate.classList.add("regenerate-empty");
+        regenerate.append("\u91CD\u65B0\u751F\u6210");
+      }
       regenerate.addEventListener("click", () => regenerateReply(conversation));
       actions.append(regenerate);
       const versions = replyVersionPicker(conversation, message);
@@ -1002,10 +1005,10 @@
         article.append(reasoningBlock(message, message.reasoning, state));
       }
       if (message.content) article.append(content);
-      if (message.truncated || interrupted) {
+      if (message.error || message.truncated || interrupted) {
         const note = document.createElement("p");
         note.className = "truncated-note";
-        note.textContent = interrupted ? message.state ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u63A5\u6536\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\uFF0C\u53EF\u4EE5\u53D1\u9001\u201C\u8BF7\u7EE7\u7EED\u201D\u3002";
+        note.textContent = message.error || (interrupted ? message.state ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u63A5\u6536\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\uFF0C\u53EF\u4EE5\u53D1\u9001\u201C\u8BF7\u7EE7\u7EED\u201D\u3002");
         article.append(note);
       }
       article.append(actions);

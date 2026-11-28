@@ -62,7 +62,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
       if (size > 4 * 1024 * 1024) return false;
-      if (now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
+      if (!saved_size || now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
       {
         auto saved = history.SaveProgress(user, conversation, turn.assistant_message.id,
             {++completion.sequence, completion.content, completion.reasoning});
@@ -83,10 +83,16 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       completion.finish_reason = FinishName(reply->finish_reason);
       completion.state = response->cancelToken()->load() ? history::MessageState::Interrupted : history::MessageState::Completed;
       if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal) completion.content = "模型拒绝回答此问题。";
+      if (completion.state == history::MessageState::Completed && completion.content.empty() && reply->finish_reason == ai::FinishReason::Length)
+      {
+        completion.state = history::MessageState::Failed;
+        completion.error = "模型达到生成长度上限，未生成正文。";
+      }
     }
     else
     {
-      auto &error = std::get<ai::Error>(result);
+      const auto &error = std::get<ai::Error>(result);
+      if (error.finish_reason) completion.finish_reason = FinishName(*error.finish_reason);
       if (error.code == ai::ErrorCode::Timeout) error_status = "504 Gateway Timeout";
       if (save_failed) error_status = "503 Service Unavailable";
       completion.error = save_failed ? "保存回复失败，请刷新历史确认。" : error.message;

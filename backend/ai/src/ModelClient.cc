@@ -208,8 +208,13 @@ namespace ai
       auto code = Perform(curl.get(), cancel);
       long status = 0;
       curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+      auto with_finish_reason = [&transfer](Error error)
+      {
+        if (transfer.finish_seen) error.finish_reason = transfer.response.finish_reason;
+        return error;
+      };
       if (cancel && cancel->load())
-        return Failure(ErrorCode::Cancelled, "生成已停止。");
+        return with_finish_reason(Failure(ErrorCode::Cancelled, "生成已停止。"));
       if (status >= 300)
       {
         auto error = Failure(ErrorCode::Upstream, "模型服务暂时不可用，请稍后重试。");
@@ -221,22 +226,28 @@ namespace ai
         return error;
       }
       if (transfer.failure)
-        return *transfer.failure;
+        return with_finish_reason(std::move(*transfer.failure));
       if (code != CURLE_OK && !(sink && transfer.terminal && code == CURLE_WRITE_ERROR))
-        return Failure(code == CURLE_OPERATION_TIMEDOUT ? ErrorCode::Timeout : ErrorCode::Transport,
-                       code == CURLE_OPERATION_TIMEDOUT ? "模型请求超时，请重试。" : "无法连接模型服务或传输中断，请重试。");
+      {
+        if (code == CURLE_OPERATION_TIMEDOUT)
+          return with_finish_reason(Failure(ErrorCode::Timeout, "模型请求超时，请重试。"));
+        if (sink && status >= 200 && status < 300 && transfer.content_type.find("text/event-stream") != std::string::npos)
+          return with_finish_reason(Failure(ErrorCode::Transport, "模型流意外中断，请重新生成。"));
+        return with_finish_reason(Failure(ErrorCode::Transport, "无法连接模型服务或传输中断，请重试。"));
+      }
       if (sink)
       {
         transfer.parser->Finish();
         if (!transfer.terminal)
-          return Failure(ErrorCode::InvalidResponse, "模型流意外中断，请重新生成。");
+          return with_finish_reason(Failure(ErrorCode::InvalidResponse, "模型流意外中断，请重新生成。"));
       }
       else
         ParseBody(Json::parse(transfer.body), transfer);
       if (transfer.failure)
-        return *transfer.failure;
-      if (transfer.response.reply.empty() && transfer.response.finish_reason != FinishReason::Refusal)
-        return Failure(ErrorCode::InvalidResponse, "模型没有返回文字回复。");
+        return with_finish_reason(std::move(*transfer.failure));
+      if (transfer.response.reply.empty() && transfer.response.finish_reason != FinishReason::Refusal
+          && transfer.response.finish_reason != FinishReason::Length)
+        return with_finish_reason(Failure(ErrorCode::InvalidResponse, "模型没有返回文字回复。"));
       return std::move(transfer.response);
     }
     catch (const std::domain_error &)
