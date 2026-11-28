@@ -246,7 +246,7 @@ int RunChatServer(const ServerConfig &config)
       throw std::runtime_error("Import backend/db/migrations/20261114-admin.sql before starting");
   }
   auth::Auth auth(mysql, redis, config.auth);
-  history::History history(mysql);
+  history::History history(mysql, config.generation_lease);
   ChatWorkers business(config.business_threads, config.business_queue_size);
   ChatWorkers workers(config.worker_threads, config.model_queue_size, true);
   chat::SubmitTask business_tasks = [&business](auto task) { return business.Submit(std::move(task)); };

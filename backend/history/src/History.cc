@@ -12,7 +12,6 @@ namespace
 using Row = std::vector<std::optional<std::string>>;
 const std::string conversation_columns = "id,user_id,title,current_message_id,created_at,updated_at,active_message_id";
 const std::string message_columns = "id,conversation_id,parent_id,role,state,content,reasoning,finish_reason,error,created_at,updated_at";
-constexpr std::int64_t lease_ms = 300000;
 TimePoint Time(std::uint64_t value) { return TimePoint(std::chrono::milliseconds(value)); }
 std::optional<std::uint64_t> OptionalId(const Row &row, std::size_t i)
 { return row.at(i) ? std::optional<std::uint64_t>(db::Number(row, i)) : std::nullopt; }
@@ -49,6 +48,7 @@ void Title(const std::string &title)
 struct History::Impl
 {
   db::MySql &mysql;
+  std::int64_t lease_ms;
   Row Owner(db::MySql::Connection &connection, UserId user, ConversationId conversation, bool lock = false)
   {
     auto rows = db::Take(connection.Query("SELECT " + conversation_columns + ",generation_deadline FROM conversations WHERE id=? AND user_id=?" + (lock ? " FOR UPDATE" : ""), {conversation, user}));
@@ -185,9 +185,9 @@ struct History::Impl
       db::Take(connection.Commit());
       return;
     }
-    if (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(db::NowMs()))
-      throw Error{ErrorCode::Conflict, "生成已过期，请刷新后重试。"};
     auto now = db::NowMs();
+    if (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(now))
+      throw Error{ErrorCode::Conflict, "生成已过期，请刷新后重试。"};
     if (completion)
     {
       auto state = completion->state == MessageState::Completed ? "completed" : completion->state == MessageState::Interrupted ? "interrupted" : "failed";
@@ -204,9 +204,32 @@ struct History::Impl
     }
     db::Take(connection.Commit());
   }
+  void Renew(UserId user, ConversationId conversation, MessageId message)
+  {
+    auto connection = db::Take(mysql.Acquire());
+    db::Take(connection.Begin());
+    auto row = Owner(connection, user, conversation, true);
+    auto value = Read(connection, conversation, message);
+    if (value.role != Role::Assistant) throw Error{ErrorCode::InvalidRequest, "只能续租助手回复。"};
+    if (value.state != MessageState::Generating)
+      throw Error{ErrorCode::Conflict, "回复已结束，请停止旧的生成任务。"};
+    auto now = db::NowMs();
+    if (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(now))
+      throw Error{ErrorCode::Conflict, "生成已过期，请刷新后重试。"};
+    db::Take(connection.Execute(
+        "UPDATE conversations SET generation_deadline=? WHERE id=? AND active_message_id=?",
+        {now + lease_ms, conversation, message}));
+    db::Take(connection.Commit());
+  }
 };
-History::History(db::MySql &mysql) : impl_(std::make_unique<Impl>(Impl{mysql})) {}
+History::History(db::MySql &mysql, std::chrono::milliseconds lease)
+    : impl_(std::make_unique<Impl>(Impl{mysql, lease.count()}))
+{
+  if (lease.count() <= 0)
+    throw std::invalid_argument("History generation lease must be positive");
+}
 History::~History() = default;
+std::chrono::milliseconds History::lease() const { return std::chrono::milliseconds(impl_->lease_ms); }
 Result<Conversation> History::Create(UserId user, const std::string &title)
 {
   return Guard<Conversation>([&] {
@@ -351,6 +374,8 @@ Result<Turn> History::Regenerate(UserId user, ConversationId conversation, Messa
 { return Guard<Turn>([&] { return impl_->Start(user, conversation, request, "", question); }); }
 Status History::SaveProgress(UserId user, ConversationId conversation, MessageId message, const Progress &progress)
 { return Guard<std::monostate>([&] { impl_->Update(user, conversation, message, progress, nullptr); return std::monostate{}; }); }
+Status History::RenewLease(UserId user, ConversationId conversation, MessageId message)
+{ return Guard<std::monostate>([&] { impl_->Renew(user, conversation, message); return std::monostate{}; }); }
 Status History::Finish(UserId user, ConversationId conversation, MessageId message, const Completion &completion)
 {
   return Guard<std::monostate>([&] {

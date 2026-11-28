@@ -350,7 +350,18 @@ python3 scripts/test-client-disconnect-cancel.py \
 
 用例从真实 `POST /api/chat` 发起生成，验证上游释放时延、合法半关闭、排队取消后无上游调用及队列满时的 `503`。支持用 `--case` 选跑。[断开取消测试](../scripts/test-client-disconnect-cancel.py)
 
-### 9.3 上游响应大小回归
+### 9.3 生成租约回归
+
+使用上节的 Reactor 和 Proactor 二进制，通过短 `server.generation_lease_ms`（3 秒）在隔离的 MySQL 8.4、Redis 8.0 与模拟上游上验证长静默流、SSE 心跳流、非流式长请求、排队等待超过租约、进程强杀恢复、主动取消即时释放、以及租约过期后旧任务被拒绝且不覆盖接管任务：
+
+```bash
+python3 scripts/test-generation-lease.py \
+  --reactor build-reactor/server --proactor build-proactor/server
+```
+
+支持用 `--case` 选跑。[生成租约测试](../scripts/test-generation-lease.py)
+
+### 9.4 上游响应大小回归
 
 ```bash
 python3 scripts/test-stream-size-limits.py \
