@@ -235,9 +235,7 @@ function applyConversation(conversation: Conversation, data: GetResponses[`/api/
   conversationErrors.delete(conversation.id);
   Object.assign(conversation, data.conversation, { loaded: true });
   updateConversationMessages(conversation, data.messages);
-  const last = conversation.messages.at(-1);
-  if (last?.error) failures.set(conversation.id, last.error);
-  else failures.delete(conversation.id);
+  failures.delete(conversation.id);
   scheduleConversationPoll(conversation);
 }
 
@@ -903,9 +901,14 @@ function createMessageView(conversation: Conversation, message: Message) {
     actions.append(copy);
     const regenerate = document.createElement('button');
     regenerate.className = 'regenerate-button';
-    regenerate.title = '重新生成这条回复';
-    regenerate.setAttribute('aria-label', '重新生成这条回复');
+    const emptyFailure = message.state === 'failed' && !message.content && !message.reasoning;
+    regenerate.title = emptyFailure ? '重新生成' : '重新生成这条回复';
+    regenerate.setAttribute('aria-label', regenerate.title);
     regenerate.append(icon('retry'));
+    if (emptyFailure) {
+      regenerate.classList.add('regenerate-empty');
+      regenerate.append('重新生成');
+    }
     regenerate.addEventListener('click', () => regenerateReply(conversation));
     actions.append(regenerate);
     const versions = replyVersionPicker(conversation, message);
@@ -917,12 +920,12 @@ function createMessageView(conversation: Conversation, message: Message) {
       article.append(reasoningBlock(message, message.reasoning, state));
     }
     if (message.content) article.append(content);
-    if (message.truncated || interrupted) {
+    if (message.error || message.truncated || interrupted) {
       const note = document.createElement('p');
       note.className = 'truncated-note';
-      note.textContent = interrupted
+      note.textContent = message.error || (interrupted
         ? message.state ? '生成已中断，以上是已收到的内容。' : '接收已中断，以上是已收到的内容。'
-        : '回复达到长度限制，可以发送“请继续”。';
+        : '回复达到长度限制，可以发送“请继续”。');
       article.append(note);
     }
     article.append(actions);

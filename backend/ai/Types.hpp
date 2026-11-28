@@ -85,6 +85,7 @@ struct Error
   std::string message; // 脱敏说明，不直接暴露密钥或上游原始错误体。
   std::optional<int> http_status;
   std::string request_id;
+  std::optional<FinishReason> finish_reason = std::nullopt;
 };
 
 template <typename T>

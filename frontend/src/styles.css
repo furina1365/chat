@@ -655,6 +655,14 @@ h1 {
   color: var(--icon-hover);
 }
 
+.regenerate-button.regenerate-empty {
+  width: auto;
+  min-height: 32px;
+  gap: 6px;
+  padding-inline: 9px;
+  background: var(--icon-surface);
+}
+
 .regenerate-button:disabled {
   opacity: .45;
 }
