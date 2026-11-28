@@ -251,6 +251,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   completion.state = history::MessageState::Failed;
   bool save_failed = false;
   const char *error_status = "502 Bad Gateway";
+  const char *error_code = "generation_failed";
   auto last_save = std::chrono::steady_clock::now();
   std::size_t saved_size = 0;
   try
@@ -296,7 +297,16 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     else
     {
       auto &error = std::get<ai::Error>(result);
-      if (error.code == ai::ErrorCode::Timeout) error_status = "504 Gateway Timeout";
+      switch (error.code)
+      {
+      case ai::ErrorCode::Timeout:
+        error_status = "504 Gateway Timeout";
+        error_code = "upstream_timeout";
+        break;
+      case ai::ErrorCode::ConnectTimeout: error_code = "upstream_connect_timeout"; break;
+      case ai::ErrorCode::StreamIdleTimeout: error_code = "upstream_idle_timeout"; break;
+      default: break;
+      }
       if (save_failed) error_status = "503 Service Unavailable";
       completion.error = save_failed ? "保存回复失败，请刷新历史确认。" : error.message;
       completion.state = error.code == ai::ErrorCode::Cancelled ? history::MessageState::Interrupted : history::MessageState::Failed;
@@ -326,7 +336,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   if (completion.state != history::MessageState::Completed)
   {
     auto message = completion.error.empty() ? "生成已中断，可重新生成。" : completion.error;
-    if (stream) response->SendEvent("error", Json{{"code", "generation_failed"}, {"error", message}}.dump(), true);
+    if (stream) response->SendEvent("error", Json{{"code", error_code}, {"error", message}}.dump(), true);
     else detail::ReplyError(response, error_status, "generation_failed", message);
     return;
   }

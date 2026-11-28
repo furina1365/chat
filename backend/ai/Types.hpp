@@ -33,10 +33,10 @@ struct ModelConfig
   std::optional<double> temperature;
   std::optional<double> top_p;
 
-  // config.json 的 models 数组中的 timeout_ms、connect_timeout_ms 和 max_response_bytes。
-  // timeout 是调用总时长；客户端开始调用时据此计算 deadline。
+  // config.json 的 models 数组中的超时与大小限制。
   std::chrono::milliseconds timeout{60000};
   std::chrono::milliseconds connect_timeout{10000};
+  std::optional<std::chrono::milliseconds> stream_idle_timeout;
   std::size_t max_response_bytes = 4 * 1024 * 1024;
 };
 
@@ -76,7 +76,8 @@ using TextSink = std::function<bool(const std::string &)>;
 enum class ErrorCode
 {
   InvalidRequest, UnsupportedFeature, Authentication, RateLimited,
-  Timeout, Cancelled, Transport, Upstream, InvalidResponse, ResourceLimit, Internal
+  Timeout, ConnectTimeout, StreamIdleTimeout, Cancelled, Transport, Upstream,
+  InvalidResponse, ResourceLimit, Internal
 };
 
 struct Error

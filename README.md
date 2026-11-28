@@ -411,6 +411,7 @@ tar -xzf chat-binary.tar.gz
     "top_p": null,
     "timeout_ms": 60000,
     "connect_timeout_ms": 10000,
+    "stream_idle_timeout_ms": 60000,
     "max_response_bytes": 4194304
   }
 ]
@@ -418,9 +419,22 @@ tar -xzf chat-binary.tar.gz
 
 密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
 
-超时与大小配置必须为正整数：`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间，`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
+超时与大小配置必须为正整数。`timeout_ms` 限制单次上游调用的总时长，默认 60 秒。`connect_timeout_ms` 限制 DNS 解析和连接建立，默认 10 秒。`stream_idle_timeout_ms` 配置后限制连接建立到收到首个响应体字节的时间，以及后续两次收到响应体字节之间的时间。上游 SSE 心跳重置空闲计时，服务端发给浏览器的心跳维持下游连接。省略该字段时沿用连接和总时限。`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
 
-两套后端的连接空闲上限均为 30 秒；在 `CMakeLists.txt` 中将 `set(CHAT_LOGGING ON)` 改为 `set(CHAT_LOGGING OFF)` 并重新编译后为 60 秒。从最近一次客户端读取计时，配置更长的模型超时也不能突破这一连接限制。
+DeepSeek 长回复示例在 `models` 中配置 10 分钟总时限与 60 秒流式空闲时限。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
+
+```json
+{
+  "provider": "deepseek",
+  "api": "openai-completions",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "api_key": "replace-with-your-deepseek-api-key",
+  "timeout_ms": 600000,
+  "connect_timeout_ms": 10000,
+  "stream_idle_timeout_ms": 60000
+}
+```
 
 ## 接口
 
