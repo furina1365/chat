@@ -335,7 +335,7 @@ python3 scripts/test-sse-idle-timeout.py \
   --reactor build-reactor/server --proactor build-proactor/server
 ```
 
-两种后端各验证七种情况：正文流、心跳流、静默连接、半截请求、停止读取、极慢读取、模型先超时。脚本输出每个用例的结果，任一失败时返回非零。可用 `--case` 选跑，用 `--help` 查看用例名。[回归脚本](../scripts/test-sse-idle-timeout.py)
+两种后端都验证正文流和浏览器收到的心跳跨过 60 秒、静默连接、半截请求、停止读取和极慢读取。使用模拟上游和较短的配置验证连接、首字节和相邻响应字节的空闲时限，验证心跳流最终达到总时限，以及超时后通过历史恢复正文和思考。租约用例缩短生成租约至 3 秒，验证上游仅发送心跳并跨过租约后仍能保存回复并发送 `done`。可用 `--case` 选跑，用 `--help` 查看用例名。[回归脚本](../scripts/test-sse-idle-timeout.py)
 
 脚本先用 `server --network-backend` 核对两个二进制的编译后端，再启动临时依赖。可用 `python3 scripts/test-sse-http-framing.py -v` 单独验证回归客户端能识别 HTTP 分块截断，仅需 Python 3 和本机回环连接。[分块测试](../scripts/test-sse-http-framing.py)
 

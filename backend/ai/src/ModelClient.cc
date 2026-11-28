@@ -16,6 +16,7 @@ namespace ai
   namespace
   {
     using Json = nlohmann::json;
+    using Clock = std::chrono::steady_clock;
     void InitCurl() { transport::InitCurl(); }
     struct Transfer : ModelResponseState
     {
@@ -25,6 +26,8 @@ namespace ai
       std::string content_type, body;
       std::size_t received = 0;
       std::unique_ptr<SseParser> parser;
+      std::optional<Clock::time_point> idle_deadline;
+      bool idle_timed_out = false;
 
       Transfer(const ModelConfig &settings, const CancelToken &token, const TextSink *callback,
                const TextSink *reasoning_callback)
@@ -70,6 +73,8 @@ namespace ai
           t.failure = Failure(ErrorCode::Cancelled, "生成已停止。");
           return 0;
         }
+        if (t.sink && t.config.stream_idle_timeout && length)
+          t.idle_deadline = Clock::now() + *t.config.stream_idle_timeout;
         const bool success = t.http_status >= 200 && t.http_status < 300;
         const bool stream = success && t.sink;
         const auto limit = stream ? t.config.max_stream_bytes : t.config.max_response_bytes;
@@ -115,17 +120,24 @@ namespace ai
       return t.cancel && t.cancel->load() ? 1 : 0;
     }
 
-    CURLcode Perform(CURL *curl, const CancelToken &cancel)
+    bool TransferStarted(CURL *curl)
+    {
+      curl_off_t pretransfer = 0;
+      curl_easy_getinfo(curl, CURLINFO_PRETRANSFER_TIME_T, &pretransfer);
+      return pretransfer > 0;
+    }
+
+    CURLcode Perform(CURL *curl, Transfer &transfer)
     {
       auto multi = std::unique_ptr<CURLM, decltype(&curl_multi_cleanup)>(curl_multi_init(), curl_multi_cleanup);
       if (!multi || curl_multi_add_handle(multi.get(), curl) != CURLM_OK)
         return CURLE_FAILED_INIT;
 
-      constexpr int cancel_poll_ms = 50;
+      constexpr std::chrono::milliseconds cancel_poll{50};
       CURLcode result = CURLE_RECV_ERROR;
       for (;;)
       {
-        if (cancel && cancel->load())
+        if (transfer.cancel && transfer.cancel->load())
         {
           result = CURLE_ABORTED_BY_CALLBACK;
           break;
@@ -141,7 +153,26 @@ namespace ai
             result = message->data.result;
           break;
         }
-        if (curl_multi_poll(multi.get(), nullptr, 0, cancel_poll_ms, nullptr) != CURLM_OK)
+        auto poll = cancel_poll;
+        if (transfer.sink && transfer.config.stream_idle_timeout)
+        {
+          auto now = Clock::now();
+          // DNS、连接与协议握手完成后开始等待响应体。
+          if (!transfer.idle_deadline && TransferStarted(curl))
+            transfer.idle_deadline = now + *transfer.config.stream_idle_timeout;
+          if (transfer.idle_deadline)
+          {
+            auto remaining = *transfer.idle_deadline - now;
+            if (remaining <= Clock::duration::zero())
+            {
+              transfer.idle_timed_out = true;
+              result = CURLE_OPERATION_TIMEDOUT;
+              break;
+            }
+            poll = std::min(poll, std::chrono::ceil<std::chrono::milliseconds>(remaining));
+          }
+        }
+        if (curl_multi_poll(multi.get(), nullptr, 0, static_cast<int>(poll.count()), nullptr) != CURLM_OK)
           break;
       }
       curl_multi_remove_handle(multi.get(), curl);
@@ -223,7 +254,7 @@ namespace ai
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, Progress);
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &transfer);
       curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http,https");
-      auto code = Perform(curl.get(), cancel);
+      auto code = Perform(curl.get(), transfer);
       long status = 0;
       curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
       auto with_finish_reason = [&transfer](Error error)
@@ -233,6 +264,14 @@ namespace ai
       };
       if (cancel && cancel->load())
         return with_finish_reason(Failure(ErrorCode::Cancelled, "生成已停止。"));
+      if (sink && code == CURLE_OPERATION_TIMEDOUT)
+      {
+        if (transfer.idle_timed_out)
+          return with_finish_reason(Failure(ErrorCode::StreamIdleTimeout, "模型流式响应空闲超时，请重试。"));
+        if (config.connect_timeout < config.timeout && !TransferStarted(curl.get()))
+          return Failure(ErrorCode::ConnectTimeout, "连接模型服务超时，请重试。");
+        return with_finish_reason(Failure(ErrorCode::Timeout, "模型请求超时：已达到单次调用总时限，请重试。"));
+      }
       if (status >= 300)
       {
         auto error = Failure(ErrorCode::Upstream, "模型服务暂时不可用，请稍后重试。");

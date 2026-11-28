@@ -411,6 +411,7 @@ tar -xzf chat-binary.tar.gz
     "top_p": null,
     "timeout_ms": 60000,
     "connect_timeout_ms": 10000,
+    "stream_idle_timeout_ms": 60000,
     "max_response_bytes": 4194304,
     "max_stream_bytes": 67108864,
     "max_sse_event_bytes": 262144
@@ -422,7 +423,7 @@ tar -xzf chat-binary.tar.gz
 
 `provider` 为 `deepseek` 且 `api` 为 `openai-completions` 时，`deepseek-flash` 和 `deepseek-v4-pro` 支持在输入区切换 High 和 Max。缺省使用 High，两个档位都启用思考模式。DeepSeek 仍接受的 Flash 旧名称 `deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp` 同样支持该选项。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
 
-超时与大小配置必须为正整数。`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间。
+超时与大小配置必须为正整数。`timeout_ms` 限制单次上游调用的总时长，默认 60 秒。`connect_timeout_ms` 限制 DNS 解析和连接建立，默认 10 秒。`stream_idle_timeout_ms` 配置后限制连接建立到收到首个响应体字节的时间，以及后续两次收到响应体字节之间的时间。上游 SSE 心跳重置空闲计时，服务端发给浏览器的心跳维持下游连接。省略该字段时沿用连接和总时限。
 
 | 大小配置 | 计量范围 | 默认值 | 最大值 |
 | --- | --- | --- | --- |
@@ -432,7 +433,20 @@ tar -xzf chat-binary.tar.gz
 
 正文与思考解包后合计最多 4 MiB（UTF-8 字节），与历史存储上限一致。超出任一 SSE 上限时结束生成，历史保留已接收的合规增量并记录超限原因。已有配置若使用 `max_response_bytes` 控制 SSE 流大小，可改用 `max_stream_bytes`。
 
-两套后端的连接空闲上限均为 30 秒；在 `CMakeLists.txt` 中将 `set(CHAT_LOGGING ON)` 改为 `set(CHAT_LOGGING OFF)` 并重新编译后为 60 秒。从最近一次客户端读取计时，配置更长的模型超时也不能突破这一连接限制。
+DeepSeek 长回复示例在 `models` 中配置 10 分钟总时限与 60 秒流式空闲时限。
+
+```json
+{
+  "provider": "deepseek",
+  "api": "openai-completions",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "api_key": "replace-with-your-deepseek-api-key",
+  "timeout_ms": 600000,
+  "connect_timeout_ms": 10000,
+  "stream_idle_timeout_ms": 60000
+}
+```
 
 ## 接口
 
