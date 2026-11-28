@@ -98,7 +98,8 @@ npm run build      # 先检查类型，再生成浏览器脚本及 vendor 资源
     "worker_threads": 16,
     "business_threads": 4,
     "business_queue_size": 64,
-    "model_queue_size": 8
+    "model_queue_size": 8,
+    "generation_lease_ms": 300000
   },
   "mysql": {
     "host": "127.0.0.1",
@@ -161,7 +162,7 @@ npm run build      # 先检查类型，再生成浏览器脚本及 vendor 资源
 
 `server` 集中配置监听地址、端口和线程数，可省略，也可只覆盖部分字段。`server.host` 默认 `0.0.0.0`，监听所有 IPv4 网卡，其他设备可通过服务器的局域网 IP 访问。设为 `127.0.0.1` 时仅允许本机 IPv4 访问；`::1` 监听 IPv6 本机地址，浏览器使用 `http://[::1]:53411`。也可填写本机主机名，绑定解析得到的第一个 IPv4 或 IPv6 地址。地址无法解析或绑定时启动失败，修改后重启生效。
 
-项目配置为 14 个 IO 线程、16 个模型 worker。`io_threads` 为 0 时按 CPU 逻辑核数自动配置，正整数指定处理连接的 IO 线程数。这些线程之外还有一个负责接入连接的主线程。`worker_threads` 是执行模型调用的线程数，必须为正整数；账号、密码哈希、邮件和历史访问使用 `business_threads` 个独立业务线程，默认 4 个；因此服务自身线程总数为 `1 + 实际 IO 线程数 + worker_threads + business_threads`。`business_queue_size` 和 `model_queue_size` 分别限制排队任务，默认 64 和 8，满时返回 503。上述线程与队列配置对 Reactor 和 Proactor 都生效；省略字段时，端口默认 53411、IO 线程数自动计算、worker 默认 2 个。配置缺失、格式错误、未知或重复字段、端口越界及非法线程数会报错退出。
+项目配置为 14 个 IO 线程、16 个模型 worker。`io_threads` 为 0 时按 CPU 逻辑核数自动配置，正整数指定处理连接的 IO 线程数。这些线程之外还有一个负责接入连接的主线程。`worker_threads` 是执行模型调用的线程数，必须为正整数；账号、密码哈希、邮件和历史访问使用 `business_threads` 个独立业务线程，默认 4 个；首次发起聊天后还会按需启动 1 条共享后台租约续期线程。因此服务自身线程总数为 `1 + 实际 IO 线程数 + worker_threads + business_threads`（活跃聊天后加 1 条续租线程）。`business_queue_size` 和 `model_queue_size` 分别限制排队任务，默认 64 和 8，满时返回 503。`generation_lease_ms` 为生成租约时长（毫秒），默认 `300000`（5 分钟），最小 `1000`。上述配置对 Reactor 和 Proactor 都生效；省略字段时，端口默认 53411、IO 线程数自动计算、worker 默认 2 个。配置缺失、格式错误、未知或重复字段、端口越界及非法线程数会报错退出。
 
 `mysql` 和 `redis` 可省略，也可只填写需要覆盖的字段，其余使用数据库配置结构中的默认值。`pool_size` 为每个服务实例的连接池上限，`acquire_timeout_ms` 为等待借用连接的毫秒数。MySQL 的连接及 IO 超时使用秒，Redis 使用毫秒；端口范围为 1–65535，连接池大小和超时必须为正整数，Redis 的 `database` 为非负整数。嵌套对象中的未知或重复字段同样会报错。
 
@@ -446,7 +447,7 @@ tar -xzf chat-binary.tar.gz
 
 - `stream` 默认 true。SSE 使用 `meta` 返回持久化消息 ID，`delta` / `reasoning_delta` 分开发送正文与思考，最终回复提交 MySQL 成功后发送 `done`；上游异常或保存失败使用 `error` 结束。普通响应包含 reply、reasoning、finish_reason 和消息 ID。
 - 停止生成会取消上游调用并保存已收到的正文与思考，已成功提交的历史在重启后保留；重新生成成功前仍展示原回答。
-- 一个会话同时最多一条生成任务；`request_id` 去重，重复请求不会再次调用模型。进度按递增 sequence 保存，终态不能被旧快照覆盖。生成租约 5 分钟，进度保存时续期；异常退出后的占位在过期读取时转为中断。
+- 一个会话同时最多一条生成任务；`request_id` 去重，重复请求不会再次调用模型。进度按递增 sequence 保存，终态不能被旧快照覆盖。生成租约默认 5 分钟（可通过 `server.generation_lease_ms` 调整），排队与生成活跃期间定期续期，进度保存时也会续期；异常退出后的占位在过期读取或新请求时转为中断。
 - 模型任务与业务任务分别使用有界队列。每条连接的流式待发送队列限制为 1 MiB，接收过慢时停止生成。
 - DeepSeek Chat Completions 启用思考模式，Responses 接收公开思考摘要，Messages 接收 thinking 文字，不展示签名或加密字段。思考内容单独保存，不混入下一轮正文上下文。当前仅支持文字。
 
