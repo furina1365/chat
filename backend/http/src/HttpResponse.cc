@@ -88,6 +88,31 @@ bool HttpResponse::Heartbeat(bool when_empty)
   return Push(Chunk(": ping\n\n"));
 }
 
+void HttpResponse::SetCancelHandler(std::function<void()> handler)
+{
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!cancel_->load())
+    {
+      cancel_handler_ = std::move(handler);
+      return;
+    }
+  }
+  handler();
+}
+
+void HttpResponse::Cancel()
+{
+  std::function<void()> handler;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cancel_->store(true);
+    handler = std::move(cancel_handler_);
+  }
+  if (handler)
+    handler();
+}
+
 bool HttpResponse::overloaded() const
 {
   std::lock_guard<std::mutex> lock(mutex_);

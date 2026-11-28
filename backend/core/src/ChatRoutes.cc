@@ -259,7 +259,7 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
         detail::Safely(response, [&] {
           Generate(history, user, conversation, turn, client, request, stream, response);
         });
-      }, std::move(start_stream))) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
+      }, std::move(start_stream), response)) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
     }
     catch (...)
     {

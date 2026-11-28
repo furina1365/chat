@@ -352,19 +352,32 @@ def queued(chat, model, mode):
                     started = time.monotonic()
                     queued_peer.close()
                 fd_latency = check_socket_close(accepted, started)
-                running.complete.set()
+        if cancel:
+            check_history(chat, conversation, "interrupted", "")
+            require(not pending.started.is_set(), "cancelled queued job called upstream")
+            _, following, request = turn(chat, model, f"{name}-retry", conversation=conversation)
+            with socket.create_connection((HOST, chat.port), timeout=3) as retry_peer:
+                send_chat(chat, retry_peer, request)
+                with retry_peer.makefile("rb") as wire:
+                    status = wire.readline()
+                    require(status.startswith(b"HTTP/1.1 200 "), f"retry could not enter the queue: {status!r}")
+                    http.client.parse_headers(wire)
+                    frames = SUITE["frames"](wire, time.monotonic())
+                    require(next(frames)[1] == {"comment": "connected"}, "retry was not admitted")
+                    require(not running.released.is_set() and not following.started.is_set(),
+                            "original call was no longer holding the worker")
+                    following.complete.set()
+                    running.complete.set()
+                    events = [frame["event"] for _, frame in frames if "event" in frame]
+                    require(events == ["meta", "delta", "done"], f"unexpected retry events {events}")
         with http.client.HTTPResponse(active_peer) as response:
             response.begin()
             require(response.status == 200 and json.load(response)["reply"] == "reply", "running request did not finish")
 
     if cancel:
-        check_history(chat, conversation, "interrupted")
         require(not pending.started.is_set(), "cancelled queued job called upstream")
-        _, following, request = turn(chat, model, "after-queued-cancellation", stream=False, conversation=conversation)
-        following.complete.set()
-        data, _ = chat.api("/api/chat", 200, request)
-        require(data["reply"] == "reply", "could not send again in the same conversation")
-        return f"fd closed in {fd_latency:.3f}s while queued, zero upstream calls, 503 and follow-up verified"
+        check_history(chat, conversation, "completed", "reply")
+        return f"fd closed in {fd_latency:.3f}s, queue slot and conversation freed while worker was busy"
     check_history(chat, conversation, "completed", "reply")
     return "503 on saturation, connected comment before meta, delta and done"
 
@@ -379,12 +392,12 @@ def queued_fetch(chat, model):
             require(not pending.started.is_set(), "queued request got a busy worker")
             accepted = accepted_socket(chat, port)
             fd_latency = check_socket_close(accepted, abort_client(client))
+        check_history(chat, conversation, "interrupted", "")
         running.complete.set()
         with http.client.HTTPResponse(peer) as response:
             response.begin()
             require(response.status == 200, "running request did not finish")
             response.read()
-    check_history(chat, conversation, "interrupted")
     require(not pending.started.is_set(), "cancelled queued fetch called upstream")
     return f"fd closed in {fd_latency:.3f}s while queued, AbortController.abort() made no model call"
 
