@@ -418,7 +418,9 @@ tar -xzf chat-binary.tar.gz
 ]
 ```
 
-密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
+密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 返回服务商、模型名和可用的思考强度。采样和输出上限由模型配置管理。`temperature`、`top_p` 及输出上限缺省或为 `null` 时使用上游默认值。Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
+
+`provider` 为 `deepseek` 且 `api` 为 `openai-completions` 时，`deepseek-flash` 和 `deepseek-v4-pro` 支持在输入区切换 High 和 Max。缺省使用 High，两个档位都启用思考模式。DeepSeek 仍接受的 Flash 旧名称 `deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp` 同样支持该选项。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
 
 超时与大小配置必须为正整数。`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间。
 

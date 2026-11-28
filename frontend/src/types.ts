@@ -16,15 +16,19 @@ export interface DeviceSession {
   current: boolean;
 }
 
+export type ReasoningEffort = 'high' | 'max';
+
 export interface Model {
   provider: string;
   model: string;
+  reasoning_efforts?: ReasoningEffort[];
 }
 
-export type ChatRequest = Model & {
+export type ChatRequest = Pick<Model, 'provider' | 'model'> & {
   conversation_id: string;
   request_id: string;
   stream: boolean;
+  reasoning_effort?: ReasoningEffort;
 } & (
   | { content: string; regenerate_message_id?: never }
   | { regenerate_message_id: string; content?: never }
@@ -64,6 +68,7 @@ export interface Conversation extends ConversationSummary {
   loaded: boolean;
   provider?: string;
   model?: string;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface HistoryCursor {
@@ -87,6 +92,7 @@ export interface PendingSend {
   requestId: string;
   parentId: string | null;
   model: Model;
+  reasoningEffort?: ReasoningEffort;
   error: string;
   rejected?: boolean;
 }
@@ -96,6 +102,7 @@ export interface PendingRegenerate {
   previousAssistantId: string | undefined;
   requestId: string;
   model: Model;
+  reasoningEffort?: ReasoningEffort;
   error: string;
 }
 

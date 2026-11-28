@@ -150,6 +150,13 @@ namespace ai
 
   } // namespace
 
+  bool ModelClient::SupportsReasoningEffort() const
+  {
+    return config_.api == Api::OpenAICompletions && config_.provider == "deepseek" &&
+        (config_.model == "deepseek-flash" || config_.model == "deepseek-v4-pro" ||
+         config_.model == "deepseek-v4-flash" || config_.model == "deepseek-v4-flash-vision-exp");
+  }
+
   Result<ChatResponse> ModelClient::Call(const ChatRequest &request, const TextSink *sink,
                                          const CancelToken &cancel, const TextSink *reasoning_sink) const
   {
@@ -159,6 +166,8 @@ namespace ai
     {
       if (cancel && cancel->load())
         return Failure(ErrorCode::Cancelled, "生成已停止。");
+      if (request.reasoning_effort && !SupportsReasoningEffort())
+        return Failure(ErrorCode::UnsupportedFeature, "该模型不支持设置思考强度。");
       if (sink && !*sink)
         return Failure(ErrorCode::InvalidRequest, "流式回调为空。");
       if (request.messages.empty() || request.messages.size() > 200)
