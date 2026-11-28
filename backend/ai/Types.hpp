@@ -36,6 +36,8 @@ struct ModelConfig
   // timeout 是调用总时长；客户端开始调用时据此计算 deadline。
   std::chrono::milliseconds timeout{60000};
   std::chrono::milliseconds connect_timeout{10000};
+  std::optional<std::chrono::milliseconds> stream_idle_timeout;
+
   // 普通响应体、流式响应体和单条 SSE 事件缓冲的字节上限。
   std::size_t max_response_bytes = 4 * 1024 * 1024;
   std::size_t max_stream_bytes = 64 * 1024 * 1024;
@@ -87,7 +89,8 @@ using TextSink = std::function<bool(const std::string &)>;
 enum class ErrorCode
 {
   InvalidRequest, UnsupportedFeature, Authentication, RateLimited,
-  Timeout, Cancelled, Transport, Upstream, InvalidResponse, ResourceLimit, Internal
+  Timeout, ConnectTimeout, StreamIdleTimeout, Cancelled, Transport, Upstream,
+  InvalidResponse, ResourceLimit, Internal
 };
 
 struct Error

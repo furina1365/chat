@@ -81,6 +81,8 @@
 
 原始 SSE 流、单条上游 SSE 事件、解包后的正文与思考合计大小分别计量。正文与思考合计上限为 4 MiB（UTF-8 字节）。上游流超出任一上限时发送 `error`，其 `code` 为 `generation_failed`，`error` 文本说明具体上限。历史保留已接收的合规增量，回复状态为 `failed`。
 
+上游流式调用超时时，SSE 的 `error` 事件以 `code` 标明原因。连接超时为 `upstream_connect_timeout`，等待上游响应体超出空闲时限为 `upstream_idle_timeout`，达到单次调用总时限为 `upstream_timeout`。历史保存超时前已收到的正文、思考、已知结束原因和错误说明。
+
 进度约每 250ms 或累计 32KiB 保存一次；生成标识区分同一回复上的每次调用，递增 sequence 防止写入顺序颠倒。生成租约默认 5 分钟（可通过 `server.generation_lease_ms` 调整），在排队与生成活跃期间定期续期，进度保存时也会续期；进程崩溃后过期的占位在读取或新请求时标为中断，旧生成不能提交覆盖新生成。进程退出或崩溃后，已提交内容保留。历史列表使用游标，期间有更新的会话可能移到更靠前位置，客户端按 ID 去重。
 
 conversation 同时返回 current_message_id 和 active_message_id；重新生成期间前者保留原回答，后者标识生成任务，客户端据此禁用同一会话的并发发送并轮询刷新。
