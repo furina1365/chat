@@ -6,7 +6,8 @@
     "worker_threads": 16,
     "business_threads": 4,
     "business_queue_size": 64,
-    "model_queue_size": 8
+    "model_queue_size": 8,
+    "generation_lease_ms": 300000
   },
   "mysql": {
     "host": "127.0.0.1",
