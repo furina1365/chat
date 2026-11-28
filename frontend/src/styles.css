@@ -636,7 +636,8 @@ h1 {
   height: 15px;
 }
 
-.regenerate-button {
+.regenerate-button,
+.continue-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -650,12 +651,14 @@ h1 {
 }
 
 .regenerate-button:hover:not(:disabled),
+.continue-button:hover:not(:disabled),
 .message-actions .icon-button:hover:not(:disabled) {
   background: var(--icon-surface);
   color: var(--icon-hover);
 }
 
-.regenerate-button.regenerate-empty {
+.regenerate-button.regenerate-empty,
+.continue-button {
   width: auto;
   min-height: 32px;
   gap: 6px;
@@ -663,7 +666,8 @@ h1 {
   background: var(--icon-surface);
 }
 
-.regenerate-button:disabled {
+.regenerate-button:disabled,
+.continue-button:disabled {
   opacity: .45;
 }
 

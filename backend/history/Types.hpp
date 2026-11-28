@@ -67,6 +67,13 @@ namespace history
     std::optional<MessageId> next_id;
   };
 
+  struct GenerationModel
+  {
+    std::string provider;
+    std::string model;
+    std::string reasoning_effort;
+  };
+
   struct Message
   {
     MessageId id = 0;
@@ -81,6 +88,10 @@ namespace history
     TimePoint created_at{};
     TimePoint updated_at{};
     std::optional<ReplyVersions> versions = std::nullopt;
+    std::string generation_id;
+    GenerationModel generation_model;
+
+    bool CanContinue() const;
   };
 
   struct ConversationView

@@ -24,14 +24,16 @@ export interface Model {
   reasoning_efforts?: ReasoningEffort[];
 }
 
-export type ChatRequest = Pick<Model, 'provider' | 'model'> & {
+export type ChatRequest = {
   conversation_id: string;
   request_id: string;
   stream: boolean;
-  reasoning_effort?: ReasoningEffort;
 } & (
-  | { content: string; regenerate_message_id?: never }
-  | { regenerate_message_id: string; content?: never }
+  | (Pick<Model, 'provider' | 'model'> & { reasoning_effort?: ReasoningEffort } & (
+    | { content: string; regenerate_message_id?: never }
+    | { regenerate_message_id: string; content?: never }
+  ))
+  | { continue_message_id: string; continue_from: string }
 );
 
 export interface Message {
@@ -46,6 +48,7 @@ export interface Message {
   error?: string;
   interrupted?: boolean;
   truncated?: boolean;
+  continue_from?: string;
   versions?: {
     index: number;
     total: number;
@@ -81,6 +84,7 @@ export interface PendingReply {
   text: string;
   reasoning: string;
   regenerate: boolean;
+  continueId?: string;
   stopped: boolean;
   finished: boolean;
   assistantId?: string;
@@ -103,6 +107,13 @@ export interface PendingRegenerate {
   requestId: string;
   model: Model;
   reasoningEffort?: ReasoningEffort;
+  error: string;
+}
+
+export interface PendingContinue {
+  answerId: string;
+  revision: string;
+  requestId: string;
   error: string;
 }
 

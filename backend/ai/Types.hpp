@@ -60,10 +60,17 @@ struct Message
   std::string content;
 };
 
+struct AssistantPrefix
+{
+  std::string content;
+  std::string reasoning;
+};
+
 struct ChatRequest
 {
   std::vector<Message> messages;
   std::optional<ReasoningEffort> reasoning_effort;
+  std::optional<AssistantPrefix> prefix;
 };
 
 enum class FinishReason { Stop, Length, Refusal, Other };

@@ -11,7 +11,7 @@ namespace
 {
 using Row = std::vector<std::optional<std::string>>;
 const std::string conversation_columns = "id,user_id,title,current_message_id,created_at,updated_at,active_message_id";
-const std::string message_columns = "id,conversation_id,parent_id,role,state,content,reasoning,finish_reason,error,created_at,updated_at";
+const std::string message_columns = "id,conversation_id,parent_id,role,state,content,reasoning,finish_reason,error,created_at,updated_at,generation_id,model_provider,model_name,reasoning_effort";
 TimePoint Time(std::uint64_t value) { return TimePoint(std::chrono::milliseconds(value)); }
 std::optional<std::uint64_t> OptionalId(const Row &row, std::size_t i)
 { return row.at(i) ? std::optional<std::uint64_t>(db::Number(row, i)) : std::nullopt; }
@@ -25,7 +25,8 @@ Message ReadMessage(const Row &row)
   return {db::Number(row, 0), db::Number(row, 1), OptionalId(row, 2),
           db::Text(row, 3) == "user" ? Role::User : Role::Assistant,
           state == "completed" ? MessageState::Completed : state == "interrupted" ? MessageState::Interrupted : state == "failed" ? MessageState::Failed : MessageState::Generating,
-          db::Text(row, 5), db::Text(row, 6), db::Text(row, 7), db::Text(row, 8), Time(db::Number(row, 9)), Time(db::Number(row, 10))};
+          db::Text(row, 5), db::Text(row, 6), db::Text(row, 7), db::Text(row, 8), Time(db::Number(row, 9)), Time(db::Number(row, 10)), {},
+          row[11].value_or(""), {row[12].value_or(""), row[13].value_or(""), row[14].value_or("")}};
 }
 template<class T, class F> Result<T> Guard(F action)
 {
@@ -42,8 +43,21 @@ template<class T, class F> Result<T> Guard(F action)
 }
 void Limit(std::size_t value, std::size_t maximum)
 { if (!value || value > maximum) throw Error{ErrorCode::InvalidRequest, "分页数量超出范围。"}; }
+void ValidateRequestId(const std::string &request_id)
+{
+  if (request_id.empty() || request_id.size() > 80 ||
+      request_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != request_id.npos)
+    throw Error{ErrorCode::InvalidRequest, "请求标识无效。"};
+}
 void Title(const std::string &title)
 { if (title.empty() || title.size() > 256) throw Error{ErrorCode::InvalidRequest, "对话标题须为 1–256 字节。"}; }
+}
+bool Message::CanContinue() const
+{
+  return role == Role::Assistant && !generation_id.empty() && !content.empty() &&
+      content.size() + reasoning.size() < chat::kMaxAssistantTextBytes &&
+      (state == MessageState::Interrupted || state == MessageState::Failed ||
+       (state == MessageState::Completed && finish_reason == "length"));
 }
 struct History::Impl
 {
@@ -116,11 +130,45 @@ struct History::Impl
       row[7] = std::nullopt;
     }
   }
-  Turn Start(UserId user, ConversationId conversation, const std::string &request_id,
-             const std::string &content, std::optional<MessageId> regenerate)
+  std::optional<Turn> Replay(db::MySql::Connection &connection, ConversationId conversation,
+                             const std::string &request_id, const std::string &hash)
   {
-    if (request_id.empty() || request_id.size() > 80 || request_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != request_id.npos)
-      throw Error{ErrorCode::InvalidRequest, "请求标识无效。"};
+    auto previous = db::Take(connection.Query(
+        "SELECT request_hash,user_message_id,assistant_message_id,replay_content_bytes,"
+        "replay_reasoning_bytes,replay_finish_reason FROM turn_requests WHERE conversation_id=? AND request_id=?",
+        {conversation, request_id}));
+    if (previous.values.empty()) return std::nullopt;
+    const auto &request = previous.values.front();
+    if (db::Text(request, 0) != hash)
+      throw Error{ErrorCode::Conflict, "同一请求标识不能用于不同的消息。"};
+    auto answer = Read(connection, conversation, db::Number(request, 2));
+    if (!answer.generation_id.empty() && answer.generation_id != request_id)
+    {
+      // The same message was reopened. Reconstruct the earlier result from the
+      // append-only text and the boundary saved when it was reopened.
+      if (request[3])
+      {
+        answer.content.erase(db::Number(request, 3));
+        answer.reasoning.erase(db::Number(request, 4));
+        answer.finish_reason = db::Text(request, 5);
+        answer.state = MessageState::Completed;
+      }
+      else
+        answer.state = MessageState::Interrupted;
+    }
+    return Turn{Read(connection, conversation, db::Number(request, 1)), std::move(answer), false};
+  }
+  void Remember(db::MySql::Connection &connection, ConversationId conversation,
+                const std::string &request_id, const std::string &hash, MessageId question, MessageId answer)
+  {
+    db::Take(connection.Execute(
+        "INSERT INTO turn_requests(conversation_id,request_id,request_hash,user_message_id,assistant_message_id) VALUES(?,?,?,?,?)",
+        {conversation, request_id, hash, question, answer}));
+  }
+  Turn Start(UserId user, ConversationId conversation, const std::string &request_id,
+             const std::string &content, std::optional<MessageId> regenerate, const GenerationModel &model)
+  {
+    ValidateRequestId(request_id);
     if (!regenerate && (content.empty() || content.size() > 80000 || content.find_first_not_of(" \r\n\t") == content.npos))
       throw Error{ErrorCode::InvalidRequest, "消息内容为空或过长。"};
     auto hash = crypto::Hash(regenerate ? "regenerate:" + std::to_string(*regenerate) : "message:" + content);
@@ -128,14 +176,10 @@ struct History::Impl
     db::Take(connection.Begin());
     auto row = Owner(connection, user, conversation, true);
     Expire(connection, row);
-    auto previous = db::Take(connection.Query("SELECT request_hash,user_message_id,assistant_message_id FROM turn_requests WHERE conversation_id=? AND request_id=?", {conversation, request_id}));
-    if (!previous.values.empty())
+    if (auto previous = Replay(connection, conversation, request_id, hash))
     {
-      auto &request = previous.values.front();
-      if (db::Text(request, 0) != hash) throw Error{ErrorCode::Conflict, "同一请求标识不能用于不同的消息。"};
-      Turn turn{Read(connection, conversation, db::Number(request, 1)), Read(connection, conversation, db::Number(request, 2)), false};
       db::Take(connection.Commit());
-      return turn;
+      return std::move(*previous);
     }
     if (row[6] && db::Number(row, 7) > static_cast<std::uint64_t>(db::NowMs()))
       throw Error{ErrorCode::Conflict, "当前对话正在生成回复，请稍后重试。"};
@@ -154,9 +198,12 @@ struct History::Impl
       auto inserted = db::Take(connection.Execute("INSERT INTO messages(conversation_id,parent_id,role,state,content,reasoning,created_at,updated_at) VALUES(?,?,'user','completed',?,'',?,?)", {conversation, Id(parent), content, now, now}));
       question = Read(connection, conversation, inserted.insert_id);
     }
-    auto inserted = db::Take(connection.Execute("INSERT INTO messages(conversation_id,parent_id,role,state,content,reasoning,created_at,updated_at) VALUES(?,?,'assistant','generating','','',?,?)", {conversation, question.id, now, now}));
+    auto inserted = db::Take(connection.Execute(
+        "INSERT INTO messages(conversation_id,parent_id,role,state,content,reasoning,created_at,updated_at,"
+        "generation_id,model_provider,model_name,reasoning_effort) VALUES(?,?,'assistant','generating','','',?,?,?,?,?,?)",
+        {conversation, question.id, now, now, request_id, model.provider, model.model, model.reasoning_effort}));
     auto answer = Read(connection, conversation, inserted.insert_id);
-    db::Take(connection.Execute("INSERT INTO turn_requests(conversation_id,request_id,request_hash,user_message_id,assistant_message_id) VALUES(?,?,?,?,?)", {conversation, request_id, hash, question.id, answer.id}));
+    Remember(connection, conversation, request_id, hash, question.id, answer.id);
     if (regenerate)
       db::Take(connection.Execute("UPDATE conversations SET active_message_id=?,generation_deadline=?,updated_at=? WHERE id=?", {answer.id, now + lease_ms, now, conversation}));
     else
@@ -164,7 +211,50 @@ struct History::Impl
     db::Take(connection.Commit());
     return Turn{question, answer, true};
   }
-  void Update(UserId user, ConversationId conversation, MessageId message, const Progress &progress, const Completion *completion)
+  Turn Continue(UserId user, ConversationId conversation, MessageId message, const std::string &revision,
+                const std::string &request_id, const std::function<bool(const GenerationModel &)> &supports_prefix)
+  {
+    ValidateRequestId(request_id);
+    ValidateRequestId(revision);
+    const auto hash = crypto::Hash("continue:" + std::to_string(message) + ":" + revision);
+    auto connection = db::Take(mysql.Acquire());
+    db::Take(connection.Begin());
+    auto row = Owner(connection, user, conversation, true);
+    Expire(connection, row);
+    if (auto previous = Replay(connection, conversation, request_id, hash))
+    {
+      db::Take(connection.Commit());
+      return std::move(*previous);
+    }
+    auto answer = Read(connection, conversation, message);
+    if (row[6] || OptionalId(row, 3) != message || answer.generation_id != revision)
+      throw Error{ErrorCode::Conflict, "当前回复已变化，请刷新历史后继续生成。"};
+    if (!answer.CanContinue() || !answer.parent_id || !supports_prefix(answer.generation_model))
+      throw Error{ErrorCode::InvalidRequest, "此回复无法继续生成。"};
+    auto question = Read(connection, conversation, *answer.parent_id);
+    if (question.role != Role::User)
+      throw Error{ErrorCode::InvalidRequest, "此回复缺少原问题。"};
+
+    if (answer.state == MessageState::Completed)
+      db::Take(connection.Execute(
+          "UPDATE turn_requests SET replay_content_bytes=?,replay_reasoning_bytes=?,replay_finish_reason=? "
+          "WHERE conversation_id=? AND request_id=?",
+          {static_cast<std::uint64_t>(answer.content.size()), static_cast<std::uint64_t>(answer.reasoning.size()),
+           answer.finish_reason, conversation, answer.generation_id}));
+    auto now = db::NowMs();
+    db::Take(connection.Execute(
+        "UPDATE messages SET generation_id=?,state='generating',sequence=0,finish_reason='',error='',updated_at=? WHERE id=?",
+        {request_id, now, message}));
+    db::Take(connection.Execute(
+        "UPDATE conversations SET active_message_id=?,generation_deadline=?,updated_at=? WHERE id=?",
+        {message, now + lease_ms, now, conversation}));
+    Remember(connection, conversation, request_id, hash, question.id, message);
+    db::Take(connection.Commit());
+    answer.generation_id = request_id;
+    return Turn{std::move(question), std::move(answer), true};
+  }
+  void Update(UserId user, ConversationId conversation, MessageId message, const std::string &generation_id,
+              const Progress &progress, const Completion *completion)
   {
     if (progress.content.size() + progress.reasoning.size() > chat::kMaxAssistantTextBytes)
       throw Error{ErrorCode::InvalidRequest, "回复内容过大。"};
@@ -172,9 +262,15 @@ struct History::Impl
     db::Take(connection.Begin());
     auto row = Owner(connection, user, conversation, true);
     auto value = Read(connection, conversation, message);
+    if (value.generation_id != generation_id)
+      throw Error{ErrorCode::Conflict, "回复已继续生成，请停止旧的生成任务。"};
     auto sequences = db::Take(connection.Query("SELECT sequence FROM messages WHERE id=?", {message}));
     auto sequence = db::Number(sequences.values.front(), 0);
     if (value.role != Role::Assistant) throw Error{ErrorCode::InvalidRequest, "只能保存助手回复。"};
+    auto now = db::NowMs();
+    if (value.state == MessageState::Generating &&
+        (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(now)))
+      throw Error{ErrorCode::Conflict, "生成已过期，请刷新后重试。"};
     if (value.state != MessageState::Generating || sequence >= progress.sequence)
     {
       if (!completion && value.state != MessageState::Generating)
@@ -185,9 +281,9 @@ struct History::Impl
       db::Take(connection.Commit());
       return;
     }
-    auto now = db::NowMs();
-    if (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(now))
-      throw Error{ErrorCode::Conflict, "生成已过期，请刷新后重试。"};
+    if (progress.content.compare(0, value.content.size(), value.content) != 0 ||
+        progress.reasoning.compare(0, value.reasoning.size(), value.reasoning) != 0)
+      throw Error{ErrorCode::Conflict, "已保存的回复不能覆盖。"};
     if (completion)
     {
       auto state = completion->state == MessageState::Completed ? "completed" : completion->state == MessageState::Interrupted ? "interrupted" : "failed";
@@ -204,14 +300,14 @@ struct History::Impl
     }
     db::Take(connection.Commit());
   }
-  void Renew(UserId user, ConversationId conversation, MessageId message)
+  void Renew(UserId user, ConversationId conversation, MessageId message, const std::string &generation_id)
   {
     auto connection = db::Take(mysql.Acquire());
     db::Take(connection.Begin());
     auto row = Owner(connection, user, conversation, true);
     auto value = Read(connection, conversation, message);
     if (value.role != Role::Assistant) throw Error{ErrorCode::InvalidRequest, "只能续租助手回复。"};
-    if (value.state != MessageState::Generating)
+    if (value.state != MessageState::Generating || value.generation_id != generation_id)
       throw Error{ErrorCode::Conflict, "回复已结束，请停止旧的生成任务。"};
     auto now = db::NowMs();
     if (!row[6] || db::Number(row, 6) != message || !row[7] || db::Number(row, 7) <= static_cast<std::uint64_t>(now))
@@ -368,19 +464,28 @@ Result<std::vector<Message>> History::Context(UserId user, ConversationId conver
     return impl_->Context(connection, conversation, last, limit);
   });
 }
-Result<Turn> History::BeginTurn(UserId user, ConversationId conversation, const std::string &request, const std::string &content)
-{ return Guard<Turn>([&] { return impl_->Start(user, conversation, request, content, std::nullopt); }); }
-Result<Turn> History::Regenerate(UserId user, ConversationId conversation, MessageId question, const std::string &request)
-{ return Guard<Turn>([&] { return impl_->Start(user, conversation, request, "", question); }); }
-Status History::SaveProgress(UserId user, ConversationId conversation, MessageId message, const Progress &progress)
-{ return Guard<std::monostate>([&] { impl_->Update(user, conversation, message, progress, nullptr); return std::monostate{}; }); }
-Status History::RenewLease(UserId user, ConversationId conversation, MessageId message)
-{ return Guard<std::monostate>([&] { impl_->Renew(user, conversation, message); return std::monostate{}; }); }
-Status History::Finish(UserId user, ConversationId conversation, MessageId message, const Completion &completion)
+Result<Turn> History::BeginTurn(UserId user, ConversationId conversation, const std::string &request,
+                                const std::string &content, const GenerationModel &model)
+{ return Guard<Turn>([&] { return impl_->Start(user, conversation, request, content, std::nullopt, model); }); }
+Result<Turn> History::Regenerate(UserId user, ConversationId conversation, MessageId question,
+                                 const std::string &request, const GenerationModel &model)
+{ return Guard<Turn>([&] { return impl_->Start(user, conversation, request, "", question, model); }); }
+Result<Turn> History::Continue(UserId user, ConversationId conversation, MessageId message,
+                               const std::string &revision, const std::string &request,
+                               const std::function<bool(const GenerationModel &)> &supports_prefix)
+{ return Guard<Turn>([&] { return impl_->Continue(user, conversation, message, revision, request, supports_prefix); }); }
+Status History::SaveProgress(UserId user, ConversationId conversation, MessageId message,
+                             const std::string &generation_id, const Progress &progress)
+{ return Guard<std::monostate>([&] { impl_->Update(user, conversation, message, generation_id, progress, nullptr); return std::monostate{}; }); }
+Status History::RenewLease(UserId user, ConversationId conversation, MessageId message, const std::string &generation_id)
+{ return Guard<std::monostate>([&] { impl_->Renew(user, conversation, message, generation_id); return std::monostate{}; }); }
+Status History::Finish(UserId user, ConversationId conversation, MessageId message,
+                       const std::string &generation_id, const Completion &completion)
 {
   return Guard<std::monostate>([&] {
     if (completion.state == MessageState::Generating) throw Error{ErrorCode::InvalidRequest, "结束状态无效。"};
-    impl_->Update(user, conversation, message, Progress{completion.sequence, completion.content, completion.reasoning}, &completion);
+    impl_->Update(user, conversation, message, generation_id,
+                  Progress{completion.sequence, completion.content, completion.reasoning}, &completion);
     return std::monostate{};
   });
 }

@@ -16,6 +16,7 @@ namespace ai
     ModelClient &operator=(const ModelClient &) = delete;
 
     bool SupportsReasoningEffort() const;
+    bool SupportsPrefixCompletion() const;
 
     // 调用均阻塞调用线程且不保存会话；可并发使用同一客户端。
     // 采样和额度使用 config_ 中的后端配置。
