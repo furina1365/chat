@@ -23,10 +23,23 @@ const char *FinishName(ai::FinishReason reason)
 using detail::Json;
 Json Meta(history::ConversationId conversation, const history::Turn &turn)
 { return {{"conversation_id", std::to_string(conversation)}, {"user_message_id", std::to_string(turn.user_message.id)}, {"assistant_message_id", std::to_string(turn.assistant_message.id)}}; }
+bool FinishIfCancelled(history::History &history, history::UserId user, history::ConversationId conversation,
+                       history::MessageId message, const HttpResponse &response)
+{
+  if (!response.cancelToken()->load())
+    return false;
+  const auto saved = history.Finish(user, conversation, message, {1, history::MessageState::Interrupted, "", "", "", ""});
+  if (std::holds_alternative<history::Error>(saved))
+    std::cerr << "Failed to save an interrupted turn\n";
+  return true;
+}
+
 void Generate(history::History &history, history::UserId user, history::ConversationId conversation,
               history::Turn turn, const ai::ModelClient *client, ai::ChatRequest request,
               bool stream, const std::shared_ptr<HttpResponse> &response)
 {
+  if (FinishIfCancelled(history, user, conversation, turn.assistant_message.id, *response))
+    return;
   history::Completion completion;
   completion.state = history::MessageState::Failed;
   bool save_failed = false;
@@ -45,6 +58,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     if (stream) response->SendEvent("meta", Meta(conversation, turn).dump());
     auto sink = [&](const std::string &text, bool reasoning) {
       (reasoning ? completion.reasoning : completion.content) += text;
+      if (response->cancelToken()->load()) return false;
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
       if (size > 4 * 1024 * 1024) return false;
@@ -113,7 +127,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
 }
 }
 void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &history,
-                        const ai::ModelManager &models, SubmitTask business_tasks, SubmitTask model_tasks,
+                        const ai::ModelManager &models, SubmitTask business_tasks, SubmitModelTask model_tasks,
                         const AuthHttpConfig &config)
 {
   auto route = [&](const char *method, const char *path, AuthenticatedHandler handler) {
@@ -226,6 +240,8 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
     ai::ChatRequest request;
     try
     {
+      if (FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
+        return;
       auto messages = detail::HistoryTake(history.Context(context.user_id, conversation, turn.user_message.id));
       std::size_t bytes = 0;
       for (const auto &message : messages)
@@ -236,16 +252,19 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
         if (bytes > 240 * 1024) throw history::Error{history::ErrorCode::InvalidRequest, "对话过长，请新建对话。"};
         request.messages.push_back({message.role == history::Role::User ? ai::Role::User : ai::Role::Assistant, message.content});
       }
+      std::function<void()> start_stream;
+      if (stream)
+        start_stream = [response] { response->StartStream(); };
       if (!model_tasks([&history, user = context.user_id, conversation, turn, client, request, stream, response] {
         detail::Safely(response, [&] {
-          if (stream) response->StartStream();
           Generate(history, user, conversation, turn, client, request, stream, response);
         });
-      })) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
+      }, std::move(start_stream), response)) throw history::Error{history::ErrorCode::Unavailable, "模型任务队列已满，请稍后重试。"};
     }
     catch (...)
     {
-      history.Finish(context.user_id, conversation, turn.assistant_message.id, {1, history::MessageState::Failed, "", "", "", "请求未开始生成，请重试。"});
+      if (!FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
+        history.Finish(context.user_id, conversation, turn.assistant_message.id, {1, history::MessageState::Failed, "", "", "", "请求未开始生成，请重试。"});
       throw;
     }
   });

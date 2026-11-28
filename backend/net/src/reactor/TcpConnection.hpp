@@ -88,6 +88,7 @@ protected:
     channel_.RemoveFromEPollPoller();
     close(connectionFd);
     channel_.Reset();
+    owner_.OnClose();
   }
 
   Channel channel_;
@@ -191,8 +192,13 @@ private:
 
   bool HandleRead(uint32_t events)
   {
+    if (events & EPOLLERR)
+    {
+      Close();
+      return true;
+    }
     int connectionFd = channel_.fd();
-    if (!reading_paused_ || (events & (EPOLLERR | EPOLLHUP)))
+    if (!reading_paused_ || (events & EPOLLHUP))
     {
       while (true)
       {
@@ -207,16 +213,13 @@ private:
         {
           continue;
         }
-        if (n == 0)
-        {
-          closing_ = true;
-          break;
-        }
-        if (n < 0 && savedErrno != EAGAIN)
+        if ((events & EPOLLHUP) || (n < 0 && savedErrno != EAGAIN))
         {
           Close();
           return true;
         }
+        if (n == 0)
+          closing_ = true;
         break;
       }
       if (in_.overLimit())

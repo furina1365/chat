@@ -2,6 +2,7 @@
 #include "net/TcpConnection.hpp"
 #include "UringLoop.hpp"
 #include "net/Buffer.hpp"
+#include <poll.h>
 
 namespace net::proactor
 {
@@ -20,6 +21,7 @@ public:
   virtual ~TcpConnection()
   {
     loop_->timerQueue().Cancel(timer_);
+    loop_->timerQueue().Cancel(close_watch_);
     // 正常回收由 CanDestroy 保证所有原操作已经完成。
     if (fd_ >= 0) close(fd_);
   }
@@ -54,7 +56,9 @@ protected:
     if (closed_) return;
     LOG_INFO("closing fd=%d", fd_);
     closed_ = true;
+    owner_.OnClose();
     loop_->timerQueue().Cancel(timer_);
+    loop_->timerQueue().Cancel(close_watch_);
     // fd 保留到所有原 CQE 到达，避免未提交 SQE 引用已复用的 fd。
     shutdown(fd_, SHUT_RDWR);
     loop_->ring().Cancel(recv_);
@@ -67,6 +71,23 @@ private:
   ::TcpConnection &owner_;
   void ArmIdle()
   { timer_ = loop_->timerQueue().AddTimer(last_active_ + kIdleTimeoutMs, [this] { HandleIdleTimeout(); }); }
+  void WatchClose()
+  {
+    if (closed_ || !closing_ || recv_ || close_watch_) return;
+    // 部分内核的 io_uring poll 会在 FIN 后持续报 POLLRDHUP。定时检查 ERR/HUP。
+    pollfd socket{fd_, POLLERR | POLLHUP, 0};
+    if (poll(&socket, 1, 0) > 0)
+    {
+      Close();
+      return;
+    }
+    constexpr int close_check_ms = 50;
+    close_watch_ = loop_->timerQueue().AddTimer(NowMs() + close_check_ms, [this]
+    {
+      close_watch_ = 0;
+      WatchClose();
+    });
+  }
   void Receive()
   {
     if (closed_ || recv_ || closing_ || reading_paused_ || business_paused_) return;
@@ -167,11 +188,12 @@ private:
     { Close(); return; }
     Send();
     Receive();
+    WatchClose();
   }
   UringLoop *loop_;
   int fd_;
   uint64_t recv_ = 0, send_ = 0, last_active_ = 0;
-  TimerId timer_ = 0;
+  TimerId timer_ = 0, close_watch_ = 0;
   bool closed_ = false, business_paused_ = false;
 };
 }

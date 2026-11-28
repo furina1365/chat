@@ -339,6 +339,17 @@ python3 scripts/test-sse-idle-timeout.py \
 
 脚本先用 `server --network-backend` 核对两个二进制的编译后端，再启动临时依赖。可用 `python3 scripts/test-sse-http-framing.py -v` 单独验证回归客户端能识别 HTTP 分块截断，仅需 Python 3 和本机回环连接。[分块测试](../scripts/test-sse-http-framing.py)
 
+### 9.2 聊天断开取消回归
+
+使用上节的 Reactor 和 Proactor 二进制。测试使用同样的 Docker 依赖，另用 Node.js 的 `fetch` 和 `AbortController` 模拟客户端停止读取 SSE。
+
+```bash
+python3 scripts/test-client-disconnect-cancel.py \
+  --reactor build-reactor/server --proactor build-proactor/server
+```
+
+用例从真实 `POST /api/chat` 发起生成，验证上游释放时延、合法半关闭、排队取消后无上游调用及队列满时的 `503`。支持用 `--case` 选跑。[断开取消测试](../scripts/test-client-disconnect-cancel.py)
+
 ## 10. 执行记录模板
 
 | 项目 | 填写内容 |

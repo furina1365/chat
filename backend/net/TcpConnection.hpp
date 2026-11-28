@@ -26,6 +26,7 @@ public:
 protected:
   virtual void HandleBusiness() = 0;
   virtual bool HasPendingBusiness() const;
+  virtual void OnClose() {}
   void PauseBusiness();
   void ContinueHandling();
   void Close();

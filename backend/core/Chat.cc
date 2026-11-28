@@ -32,12 +32,14 @@ namespace
   class ChatWorkers
   {
   public:
-    explicit ChatWorkers(int count, std::size_t capacity) : capacity_(capacity)
+    explicit ChatWorkers(int count, std::size_t capacity, bool finish_cancelled = false) : capacity_(capacity)
     {
       try
       {
         for (int i = 0; i < count; ++i)
           threads_.emplace_back([this] { Work(); });
+        if (finish_cancelled)
+          threads_.emplace_back([this] { FinishCancelled(); });
       }
       catch (...)
       {
@@ -47,21 +49,44 @@ namespace
     }
     ~ChatWorkers() { Stop(); }
 
-    bool Submit(std::shared_ptr<std::atomic<bool>> cancel, std::function<void()> run)
+    bool Submit(std::function<void()> run, const std::function<void()> &on_admitted = {},
+                const std::shared_ptr<HttpResponse> &response = {})
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (stopping_ || jobs_.size() >= capacity_)
+      auto cancel = std::make_shared<std::atomic<bool>>(false);
+      auto response_cancel = response ? response->cancelToken() : nullptr;
+      if (response)
+        response->SetCancelHandler([this] {
+          std::lock_guard<std::mutex> lock(mutex_);
+          cancelled_.notify_one();
+        });
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (stopping_ || jobs_.size() + reserved_ >= capacity_)
         return false;
+      if (on_admitted)
+      {
+        // 保留队列名额，解锁建立 SSE，准备好之后再让 worker 看到任务。
+        ++reserved_;
+        lock.unlock();
+        try { on_admitted(); }
+        catch (...)
+        {
+          lock.lock();
+          --reserved_;
+          throw;
+        }
+        lock.lock();
+        --reserved_;
+        if (stopping_) return false;
+      }
       tokens_.erase(std::remove_if(tokens_.begin(), tokens_.end(), [](const auto &token)
                                   { return token.expired(); }), tokens_.end());
       tokens_.push_back(cancel);
-      jobs_.push_back({std::move(cancel), std::move(run)});
+      jobs_.push_back({std::move(cancel), std::move(run), response_cancel});
       ready_.notify_one();
+      if (response_cancel && response_cancel->load())
+        cancelled_.notify_one();
       return true;
     }
-
-    bool Submit(std::function<void()> run)
-    { return Submit(std::make_shared<std::atomic<bool>>(false), std::move(run)); }
 
     void Track(const std::shared_ptr<std::atomic<bool>> &cancel)
     {
@@ -81,6 +106,7 @@ namespace
         jobs_.clear();
       }
       ready_.notify_all();
+      cancelled_.notify_one();
       for (auto &thread : threads_)
         if (thread.joinable())
           thread.join();
@@ -91,6 +117,7 @@ namespace
     {
       std::shared_ptr<std::atomic<bool>> cancel;
       std::function<void()> run;
+      std::shared_ptr<std::atomic<bool>> response_cancel;
     };
 
     void Work()
@@ -111,13 +138,40 @@ namespace
       }
     }
 
+    void FinishCancelled()
+    {
+      for (;;)
+      {
+        Job job;
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          auto found = jobs_.end();
+          cancelled_.wait(lock, [&] {
+            if (stopping_)
+              return true;
+            found = std::find_if(jobs_.begin(), jobs_.end(), [](const Job &pending) {
+              return pending.response_cancel && pending.response_cancel->load();
+            });
+            return found != jobs_.end();
+          });
+          if (stopping_)
+            return;
+          job = std::move(*found);
+          jobs_.erase(found);
+        }
+        // Generate 看到取消标记后只写入 interrupted，不请求上游。
+        if (!job.cancel->load())
+          job.run();
+      }
+    }
+
     std::mutex mutex_;
-    std::condition_variable ready_;
+    std::condition_variable ready_, cancelled_;
     std::deque<Job> jobs_;
     std::vector<std::weak_ptr<std::atomic<bool>>> tokens_;
     std::vector<std::thread> threads_;
     bool stopping_ = false;
-    std::size_t capacity_;
+    std::size_t capacity_, reserved_ = 0;
   };
 
   void StaticFile(const HttpRequest &request, const std::shared_ptr<HttpResponse> &response)
@@ -194,9 +248,10 @@ int RunChatServer(const ServerConfig &config)
   auth::Auth auth(mysql, redis, config.auth);
   history::History history(mysql);
   ChatWorkers business(config.business_threads, config.business_queue_size);
-  ChatWorkers workers(config.worker_threads, config.model_queue_size);
+  ChatWorkers workers(config.worker_threads, config.model_queue_size, true);
   chat::SubmitTask business_tasks = [&business](auto task) { return business.Submit(std::move(task)); };
-  chat::SubmitTask model_tasks = [&workers](auto task) { return workers.Submit(std::move(task)); };
+  chat::SubmitModelTask model_tasks = [&workers](auto task, auto on_admitted, const auto &response)
+  { return workers.Submit(std::move(task), on_admitted, response); };
   chat::AuthHttpConfig http{config.cookie_name, config.secure_cookie, config.allowed_origins, config.auth.session_idle_timeout};
   HttpRouter router;
   chat::RegisterAuthRoutes(router, auth, business_tasks, http);

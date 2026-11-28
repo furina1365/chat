@@ -31,19 +31,21 @@ public:
       if (!loop->QueueInLoop(resume))
       {
         if (auto state = weak.lock())
-          state->cancel_->store(true);
+          state->Cancel();
       }
     };
     Tick();
   }
-  ~HttpConnection() override
-  {
-    response_->cancel_->store(true);
-    response_->owner_ = nullptr;
-    loop_->timerQueue().Cancel(tick_);
-  }
+  ~HttpConnection() override { OnClose(); }
 
 protected:
+  void OnClose() override
+  {
+    response_->Cancel();
+    response_->owner_ = nullptr;
+    loop_->timerQueue().Cancel(tick_);
+    tick_ = 0;
+  }
   bool HasPendingBusiness() const override { return active_; }
   void HandleBusiness() override
   {
@@ -94,13 +96,17 @@ private:
   }
   void Drain()
   {
-    std::lock_guard<std::mutex> lock(response_->mutex_);
+    // FIN 后用一次 SSE 注释探测仍能否写入。继续读取的客户端会正常收到它。
+    if (closing_ && active_ && !half_close_probed_ && !out_.readableBytes())
+      half_close_probed_ = response_->Heartbeat(true);
+    std::unique_lock<std::mutex> lock(response_->mutex_);
     while (!response_->output_.empty() && !out_.overLimit())
     {
       auto &text = response_->output_.front();
       auto count = std::min(text.size() - response_->offset_, out_.maxBytes() - out_.readableBytes());
       if (!out_.append(text.data() + response_->offset_, count))
       {
+        lock.unlock();
         Close();
         return;
       }
@@ -131,7 +137,7 @@ private:
   std::shared_ptr<HttpResponse> response_;
   TimerId tick_ = 0;
   HttpParser parser_;
-  bool dispatched_ = false, active_ = false;
+  bool dispatched_ = false, active_ = false, half_close_probed_ = false;
 };
 
 struct HttpServer::Impl
