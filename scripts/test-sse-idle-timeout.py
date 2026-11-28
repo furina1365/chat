@@ -239,18 +239,22 @@ class Chat:
 
 
 @contextmanager
-def chat_server(binary, model, mysql_port, redis_port):
+def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
     with tempfile.TemporaryDirectory(prefix="chat-sse-") as directory:
         with socket.socket() as reservation:
             reservation.bind((HOST, 0))
             port = reservation.getsockname()[1]
         config = json.loads((ROOT / "config.json.example").read_text())
         config["server"].update(host=HOST, port=port, io_threads=2, worker_threads=6, business_threads=2)
+        if server_options:
+            config["server"].update(server_options)
         config["mysql"].update(
             port=mysql_port, database="sse_test", username="sse_test", password=DB_PASSWORD, pool_size=4
         )
         config["redis"].update(port=redis_port, pool_size=4)
-        config["auth"]["secure_cookie"] = False
+        namespace = f"sse-test:{uuid.uuid4().hex}"
+        config["auth"].update(secure_cookie=False, key_namespace=f"{namespace}:auth",
+                              session_namespace=f"{namespace}:session")
         config["models"] = [
             {
                 "provider": "local-test", "model": name, "api": "openai-completions",

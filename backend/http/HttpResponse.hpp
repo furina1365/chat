@@ -24,8 +24,9 @@ public:
 
 private:
   friend class HttpConnection;
-  bool Push(std::string text, bool final = false);
-  void Heartbeat();
+  enum class Frame { Data, StreamStart, Final };
+  bool Push(std::string text, Frame frame = Frame::Data);
+  bool Heartbeat(bool when_empty = false);
 
   mutable std::mutex mutex_;
   std::deque<std::string> output_;

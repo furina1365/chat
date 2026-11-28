@@ -71,7 +71,7 @@
 
 聊天请求的 request_id 为 1–80 位字母、数字、下划线或连字符。相同对话内同一 request_id 和相同问题只启动一次生成，内容不同时返回 409。已完成的重试返回已保存的回复；生成中的重试返回 409。失败或中断后重新生成使用新的 request_id。每个对话同时最多生成一条回复，不跨模型调用持有事务。
 
-SSE 顺序为 `meta`（conversation_id、user_message_id、assistant_message_id）、`delta` / `reasoning_delta`（text）、`done`（finish_reason、truncated）；失败以 `error` 结束。`done` 只在最终回复提交 MySQL 成功后发送。普通 JSON 含 reply、reasoning、finish_reason、消息 ID。重新生成在成功前保留原回答；中断和失败的新增分支仍保留，可通过消息接口查询。
+流式请求获得模型队列名额后立即返回 `200` 和 SSE 注释 `: connected`。队列满时返回 JSON `503`。SSE 事件顺序为 `meta`（conversation_id、user_message_id、assistant_message_id）、`delta` / `reasoning_delta`（text）、`done`（finish_reason、truncated）。失败以 `error` 结束。`done` 只在最终回复提交 MySQL 成功后发送。普通 JSON 含 reply、reasoning、finish_reason、消息 ID。重新生成在成功前保留原回答。中断或失败的新增分支仍可通过消息接口查询。
 
 进度约每 250ms 或累计 32KiB 保存一次；终态通过递增 sequence 防止旧快照覆盖。生成租约 5 分钟，进度保存时续期；过期的占位在读取或新请求时标为中断，旧生成不能提交覆盖新生成。进程退出或崩溃后，已提交内容保留。历史列表使用游标，期间有更新的会话可能移到更靠前位置，客户端按 ID 去重。
 

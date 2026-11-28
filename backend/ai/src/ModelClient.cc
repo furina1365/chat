@@ -106,6 +106,39 @@ namespace ai
       return t.cancel && t.cancel->load() ? 1 : 0;
     }
 
+    CURLcode Perform(CURL *curl, const CancelToken &cancel)
+    {
+      auto multi = std::unique_ptr<CURLM, decltype(&curl_multi_cleanup)>(curl_multi_init(), curl_multi_cleanup);
+      if (!multi || curl_multi_add_handle(multi.get(), curl) != CURLM_OK)
+        return CURLE_FAILED_INIT;
+
+      constexpr int cancel_poll_ms = 50;
+      CURLcode result = CURLE_RECV_ERROR;
+      for (;;)
+      {
+        if (cancel && cancel->load())
+        {
+          result = CURLE_ABORTED_BY_CALLBACK;
+          break;
+        }
+        int running = 0;
+        if (curl_multi_perform(multi.get(), &running) != CURLM_OK)
+          break;
+        if (!running)
+        {
+          int pending = 0;
+          auto *message = curl_multi_info_read(multi.get(), &pending);
+          if (message && message->msg == CURLMSG_DONE)
+            result = message->data.result;
+          break;
+        }
+        if (curl_multi_poll(multi.get(), nullptr, 0, cancel_poll_ms, nullptr) != CURLM_OK)
+          break;
+      }
+      curl_multi_remove_handle(multi.get(), curl);
+      return result;
+    }
+
   } // namespace
 
   Result<ChatResponse> ModelClient::Call(const ChatRequest &request, const TextSink *sink,
@@ -172,7 +205,7 @@ namespace ai
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, Progress);
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &transfer);
       curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http,https");
-      auto code = curl_easy_perform(curl.get());
+      auto code = Perform(curl.get(), cancel);
       long status = 0;
       curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
       if (cancel && cancel->load())

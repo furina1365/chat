@@ -47,11 +47,28 @@ namespace
     }
     ~ChatWorkers() { Stop(); }
 
-    bool Submit(std::shared_ptr<std::atomic<bool>> cancel, std::function<void()> run)
+    bool Submit(std::function<void()> run, const std::function<void()> &on_admitted = {})
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (stopping_ || jobs_.size() >= capacity_)
+      auto cancel = std::make_shared<std::atomic<bool>>(false);
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (stopping_ || jobs_.size() + reserved_ >= capacity_)
         return false;
+      if (on_admitted)
+      {
+        // 保留队列名额，解锁建立 SSE，准备好之后再让 worker 看到任务。
+        ++reserved_;
+        lock.unlock();
+        try { on_admitted(); }
+        catch (...)
+        {
+          lock.lock();
+          --reserved_;
+          throw;
+        }
+        lock.lock();
+        --reserved_;
+        if (stopping_) return false;
+      }
       tokens_.erase(std::remove_if(tokens_.begin(), tokens_.end(), [](const auto &token)
                                   { return token.expired(); }), tokens_.end());
       tokens_.push_back(cancel);
@@ -59,9 +76,6 @@ namespace
       ready_.notify_one();
       return true;
     }
-
-    bool Submit(std::function<void()> run)
-    { return Submit(std::make_shared<std::atomic<bool>>(false), std::move(run)); }
 
     void Track(const std::shared_ptr<std::atomic<bool>> &cancel)
     {
@@ -117,7 +131,7 @@ namespace
     std::vector<std::weak_ptr<std::atomic<bool>>> tokens_;
     std::vector<std::thread> threads_;
     bool stopping_ = false;
-    std::size_t capacity_;
+    std::size_t capacity_, reserved_ = 0;
   };
 
   void StaticFile(const HttpRequest &request, const std::shared_ptr<HttpResponse> &response)
@@ -196,7 +210,8 @@ int RunChatServer(const ServerConfig &config)
   ChatWorkers business(config.business_threads, config.business_queue_size);
   ChatWorkers workers(config.worker_threads, config.model_queue_size);
   chat::SubmitTask business_tasks = [&business](auto task) { return business.Submit(std::move(task)); };
-  chat::SubmitTask model_tasks = [&workers](auto task) { return workers.Submit(std::move(task)); };
+  chat::SubmitModelTask model_tasks = [&workers](auto task, auto on_admitted)
+  { return workers.Submit(std::move(task), on_admitted); };
   chat::AuthHttpConfig http{config.cookie_name, config.secure_cookie, config.allowed_origins, config.auth.session_idle_timeout};
   HttpRouter router;
   chat::RegisterAuthRoutes(router, auth, business_tasks, http);
