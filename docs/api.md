@@ -73,7 +73,7 @@
 
 流式请求获得模型队列名额后立即返回 `200` 和 SSE 注释 `: connected`。队列满时返回 JSON `503`。SSE 事件顺序为 `meta`（conversation_id、user_message_id、assistant_message_id）、`delta` / `reasoning_delta`（text）、`done`（finish_reason、truncated）。首段正文或思考保存后才推送。失败以 `error` 结束。上游因长度上限结束且没有正文时，已收到的思考和 `finish_reason=length` 保存在历史中。`done` 只在最终回复提交 MySQL 成功后发送。普通 JSON 含 reply、reasoning、finish_reason、消息 ID。重新生成在成功前保留原回答。中断或失败的新增分支仍可通过消息接口查询。
 
-进度约每 250ms 或累计 32KiB 保存一次；终态通过递增 sequence 防止旧快照覆盖。生成租约 5 分钟，进度保存时续期；过期的占位在读取或新请求时标为中断，旧生成不能提交覆盖新生成。进程退出或崩溃后，已提交内容保留。历史列表使用游标，期间有更新的会话可能移到更靠前位置，客户端按 ID 去重。
+进度约每 250ms 或累计 32KiB 保存一次；终态通过递增 sequence 防止旧快照覆盖。生成租约默认 5 分钟（可通过 `server.generation_lease_ms` 调整），在排队与生成活跃期间定期续期，进度保存时也会续期；进程崩溃后过期的占位在读取或新请求时标为中断，旧生成不能提交覆盖新生成。进程退出或崩溃后，已提交内容保留。历史列表使用游标，期间有更新的会话可能移到更靠前位置，客户端按 ID 去重。
 
 conversation 同时返回 current_message_id 和 active_message_id；重新生成期间前者保留原回答，后者标识生成任务，客户端据此禁用同一会话的并发发送并轮询刷新。
 

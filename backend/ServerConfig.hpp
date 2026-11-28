@@ -4,6 +4,7 @@
 #include "db/Redis.hpp"
 #include "auth/Config.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@ struct ServerConfig
   int business_threads = 4;
   int business_queue_size = 64;
   int model_queue_size = 8;
+  std::chrono::milliseconds generation_lease{300000};
   db::MySqlConfig mysql;
   db::RedisConfig redis;
   auth::Config auth;

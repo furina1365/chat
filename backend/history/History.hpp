@@ -20,10 +20,12 @@ namespace history
   class History
   {
   public:
-    explicit History(db::MySql &mysql);
+    explicit History(db::MySql &mysql,
+                     std::chrono::milliseconds lease = std::chrono::milliseconds(300000));
     ~History();
     History(const History &) = delete;
     History &operator=(const History &) = delete;
+    std::chrono::milliseconds lease() const;
 
     Result<Conversation> Create(UserId user_id, const std::string &title);
     Result<Conversation> Get(UserId user_id, ConversationId conversation_id);
@@ -54,6 +56,10 @@ namespace history
     // 对终态写入进度返回 Conflict，调用方应停止旧生成任务。
     Status SaveProgress(UserId user_id, ConversationId conversation_id,
                         MessageId assistant_message_id, const Progress &progress);
+    // 在生成活跃期间续期当前生成租约，不改动消息内容或 sequence。
+    // 若消息已结束、租约已过期或已被其他生成接管，返回 Conflict。
+    Status RenewLease(UserId user_id, ConversationId conversation_id,
+                      MessageId assistant_message_id);
     // completion.state 只允许 Completed、Interrupted 或 Failed。
     Status Finish(UserId user_id, ConversationId conversation_id,
                   MessageId assistant_message_id, const Completion &completion);
