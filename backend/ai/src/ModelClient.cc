@@ -1,6 +1,7 @@
 #include "ai/ModelClient.hpp"
 #include "SseParser.hpp"
 #include "ModelResponseState.hpp"
+#include "common/AssistantText.hpp"
 #include "common/Curl.hpp"
 
 #include <curl/curl.h>
@@ -15,7 +16,20 @@ namespace ai
   namespace
   {
     using Json = nlohmann::json;
+    using Clock = std::chrono::steady_clock;
     void InitCurl() { transport::InitCurl(); }
+    std::string PrefixUrl(const std::string &base, const char *endpoint)
+    {
+      auto url = std::unique_ptr<CURLU, decltype(&curl_url_cleanup)>(curl_url(), curl_url_cleanup);
+      const auto path = std::string("/beta") + endpoint;
+      char *address = nullptr;
+      if (!url || curl_url_set(url.get(), CURLUPART_URL, base.c_str(), 0) != CURLUE_OK ||
+          curl_url_set(url.get(), CURLUPART_PATH, path.c_str(), 0) != CURLUE_OK ||
+          curl_url_get(url.get(), CURLUPART_URL, &address, 0) != CURLUE_OK)
+        throw std::invalid_argument("模型地址无效");
+      return std::unique_ptr<char, decltype(&curl_free)>(address, curl_free).get();
+    }
+
     struct Transfer : ModelResponseState
     {
       const ModelConfig &config;
@@ -24,10 +38,12 @@ namespace ai
       std::string content_type, body;
       std::size_t received = 0;
       std::unique_ptr<SseParser> parser;
+      std::optional<Clock::time_point> idle_deadline;
+      bool idle_timed_out = false;
 
       Transfer(const ModelConfig &settings, const CancelToken &token, const TextSink *callback,
-               const TextSink *reasoning_callback)
-          : ModelResponseState(settings.max_response_bytes, callback, reasoning_callback),
+               const TextSink *reasoning_callback, std::size_t text_budget)
+          : ModelResponseState(text_budget, callback, reasoning_callback),
             config(settings), cancel(token) {}
     };
 
@@ -69,17 +85,21 @@ namespace ai
           t.failure = Failure(ErrorCode::Cancelled, "生成已停止。");
           return 0;
         }
-        if (length > t.config.max_response_bytes - t.received)
+        if (t.sink && t.config.stream_idle_timeout && length)
+          t.idle_deadline = Clock::now() + *t.config.stream_idle_timeout;
+        const bool success = t.http_status >= 200 && t.http_status < 300;
+        const bool stream = success && t.sink;
+        const auto limit = stream ? t.config.max_stream_bytes : t.config.max_response_bytes;
+        const auto accepted = std::min(length, limit - t.received);
+        t.received += accepted;
+        if (!stream)
         {
-          t.failure = Failure(ErrorCode::ResourceLimit, "模型响应超过大小限制。");
-          return 0;
-        }
-        t.received += length;
-        if (t.http_status < 200 || t.http_status >= 300)
-          return length;
-        if (!t.sink)
-        {
-          t.body.append(data, length);
+          if (accepted != length)
+          {
+            t.failure = Failure(ErrorCode::ResourceLimit, "模型响应超过大小限制。");
+            return 0;
+          }
+          if (success) t.body.append(data, length);
           return length;
         }
         if (t.content_type.find("text/event-stream") == std::string::npos)
@@ -87,11 +107,17 @@ namespace ai
           t.failure = Failure(ErrorCode::InvalidResponse, "模型未返回 SSE 流。");
           return 0;
         }
-        auto status = t.parser->Feed(std::string_view(data, length));
+        // 同一次写入回调可能同时包含合规的完整事件和超限数据。
+        auto status = t.parser->Feed(std::string_view(data, accepted));
         if (status == SseParser::Status::LimitExceeded)
-          t.failure = Failure(ErrorCode::ResourceLimit, "模型事件超过大小限制。");
+          t.failure = Failure(ErrorCode::ResourceLimit, "模型 SSE 事件超过大小限制。");
         if (status == SseParser::Status::CallbackError && !t.failure)
           t.failure = Failure(ErrorCode::Internal, "处理模型事件失败。");
+        if (status == SseParser::Status::Ok && accepted != length)
+        {
+          t.failure = Failure(ErrorCode::ResourceLimit, "模型 SSE 流超过大小限制。");
+          return 0;
+        }
         return status == SseParser::Status::Ok ? length : 0;
       }
       catch (...)
@@ -106,17 +132,24 @@ namespace ai
       return t.cancel && t.cancel->load() ? 1 : 0;
     }
 
-    CURLcode Perform(CURL *curl, const CancelToken &cancel)
+    bool TransferStarted(CURL *curl)
+    {
+      curl_off_t pretransfer = 0;
+      curl_easy_getinfo(curl, CURLINFO_PRETRANSFER_TIME_T, &pretransfer);
+      return pretransfer > 0;
+    }
+
+    CURLcode Perform(CURL *curl, Transfer &transfer)
     {
       auto multi = std::unique_ptr<CURLM, decltype(&curl_multi_cleanup)>(curl_multi_init(), curl_multi_cleanup);
       if (!multi || curl_multi_add_handle(multi.get(), curl) != CURLM_OK)
         return CURLE_FAILED_INIT;
 
-      constexpr int cancel_poll_ms = 50;
+      constexpr std::chrono::milliseconds cancel_poll{50};
       CURLcode result = CURLE_RECV_ERROR;
       for (;;)
       {
-        if (cancel && cancel->load())
+        if (transfer.cancel && transfer.cancel->load())
         {
           result = CURLE_ABORTED_BY_CALLBACK;
           break;
@@ -132,7 +165,26 @@ namespace ai
             result = message->data.result;
           break;
         }
-        if (curl_multi_poll(multi.get(), nullptr, 0, cancel_poll_ms, nullptr) != CURLM_OK)
+        auto poll = cancel_poll;
+        if (transfer.sink && transfer.config.stream_idle_timeout)
+        {
+          auto now = Clock::now();
+          // DNS、连接与协议握手完成后开始等待响应体。
+          if (!transfer.idle_deadline && TransferStarted(curl))
+            transfer.idle_deadline = now + *transfer.config.stream_idle_timeout;
+          if (transfer.idle_deadline)
+          {
+            auto remaining = *transfer.idle_deadline - now;
+            if (remaining <= Clock::duration::zero())
+            {
+              transfer.idle_timed_out = true;
+              result = CURLE_OPERATION_TIMEDOUT;
+              break;
+            }
+            poll = std::min(poll, std::chrono::ceil<std::chrono::milliseconds>(remaining));
+          }
+        }
+        if (curl_multi_poll(multi.get(), nullptr, 0, static_cast<int>(poll.count()), nullptr) != CURLM_OK)
           break;
       }
       curl_multi_remove_handle(multi.get(), curl);
@@ -140,6 +192,18 @@ namespace ai
     }
 
   } // namespace
+
+  bool ModelClient::SupportsReasoningEffort() const
+  {
+    return config_.api == Api::OpenAICompletions && config_.provider == "deepseek" &&
+        (config_.model == "deepseek-flash" || config_.model == "deepseek-v4-pro" ||
+         config_.model == "deepseek-v4-flash" || config_.model == "deepseek-v4-flash-vision-exp");
+  }
+
+  bool ModelClient::SupportsPrefixCompletion() const
+  {
+    return SupportsReasoningEffort();
+  }
 
   Result<ChatResponse> ModelClient::Call(const ChatRequest &request, const TextSink *sink,
                                          const CancelToken &cancel, const TextSink *reasoning_sink) const
@@ -150,6 +214,18 @@ namespace ai
     {
       if (cancel && cancel->load())
         return Failure(ErrorCode::Cancelled, "生成已停止。");
+      if (request.reasoning_effort && !SupportsReasoningEffort())
+        return Failure(ErrorCode::UnsupportedFeature, "该模型不支持设置思考强度。");
+      auto text_budget = chat::kMaxAssistantTextBytes;
+      if (request.prefix)
+      {
+        if (!SupportsPrefixCompletion())
+          return Failure(ErrorCode::UnsupportedFeature, "该模型不支持继续生成。");
+        const auto saved_bytes = request.prefix->content.size() + request.prefix->reasoning.size();
+        if (saved_bytes >= text_budget)
+          return Failure(ErrorCode::ResourceLimit, "模型回复正文与思考合计超过大小限制。");
+        text_budget -= saved_bytes;
+      }
       if (sink && !*sink)
         return Failure(ErrorCode::InvalidRequest, "流式回调为空。");
       if (request.messages.empty() || request.messages.size() > 200)
@@ -175,8 +251,8 @@ namespace ai
       add_header("Content-Type: application/json");
       add_header(sink ? "Accept: text/event-stream" : "Accept: application/json");
       for (const auto &header : AuthHeaders(key)) add_header(header);
-      auto url = config.base_url + Endpoint();
-      Transfer transfer(config, cancel, sink, reasoning_sink);
+      auto url = request.prefix ? PrefixUrl(config.base_url, Endpoint()) : config.base_url + Endpoint();
+      Transfer transfer(config, cancel, sink, reasoning_sink, text_budget);
       if (sink)
       {
         auto parse_event = [this, &transfer](const SseEvent &event)
@@ -188,7 +264,7 @@ namespace ai
           catch (...) { transfer.failure = Failure(ErrorCode::Internal, "流式回调执行失败。"); }
           return false;
         };
-        transfer.parser = std::make_unique<SseParser>(parse_event, config.max_response_bytes);
+        transfer.parser = std::make_unique<SseParser>(parse_event, config.max_sse_event_bytes);
       }
       curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
       curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
@@ -205,11 +281,24 @@ namespace ai
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, Progress);
       curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &transfer);
       curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http,https");
-      auto code = Perform(curl.get(), cancel);
+      auto code = Perform(curl.get(), transfer);
       long status = 0;
       curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+      auto with_finish_reason = [&transfer](Error error)
+      {
+        if (transfer.finish_seen) error.finish_reason = transfer.response.finish_reason;
+        return error;
+      };
       if (cancel && cancel->load())
-        return Failure(ErrorCode::Cancelled, "生成已停止。");
+        return with_finish_reason(Failure(ErrorCode::Cancelled, "生成已停止。"));
+      if (sink && code == CURLE_OPERATION_TIMEDOUT)
+      {
+        if (transfer.idle_timed_out)
+          return with_finish_reason(Failure(ErrorCode::StreamIdleTimeout, "模型流式响应空闲超时，请重试。"));
+        if (config.connect_timeout < config.timeout && !TransferStarted(curl.get()))
+          return Failure(ErrorCode::ConnectTimeout, "连接模型服务超时，请重试。");
+        return with_finish_reason(Failure(ErrorCode::Timeout, "模型请求超时：已达到单次调用总时限，请重试。"));
+      }
       if (status >= 300)
       {
         auto error = Failure(ErrorCode::Upstream, "模型服务暂时不可用，请稍后重试。");
@@ -221,22 +310,29 @@ namespace ai
         return error;
       }
       if (transfer.failure)
-        return *transfer.failure;
+        return with_finish_reason(std::move(*transfer.failure));
       if (code != CURLE_OK && !(sink && transfer.terminal && code == CURLE_WRITE_ERROR))
-        return Failure(code == CURLE_OPERATION_TIMEDOUT ? ErrorCode::Timeout : ErrorCode::Transport,
-                       code == CURLE_OPERATION_TIMEDOUT ? "模型请求超时，请重试。" : "无法连接模型服务或传输中断，请重试。");
+      {
+        if (code == CURLE_OPERATION_TIMEDOUT)
+          return with_finish_reason(Failure(ErrorCode::Timeout, "模型请求超时，请重试。"));
+        if (sink && status >= 200 && status < 300 && transfer.content_type.find("text/event-stream") != std::string::npos)
+          return with_finish_reason(Failure(ErrorCode::Transport, "模型流意外中断，请重新生成。"));
+        return with_finish_reason(Failure(ErrorCode::Transport, "无法连接模型服务或传输中断，请重试。"));
+      }
       if (sink)
       {
         transfer.parser->Finish();
         if (!transfer.terminal)
-          return Failure(ErrorCode::InvalidResponse, "模型流意外中断，请重新生成。");
+          return with_finish_reason(Failure(ErrorCode::InvalidResponse, "模型流意外中断，请重新生成。"));
       }
       else
         ParseBody(Json::parse(transfer.body), transfer);
       if (transfer.failure)
-        return *transfer.failure;
-      if (transfer.response.reply.empty() && transfer.response.finish_reason != FinishReason::Refusal)
-        return Failure(ErrorCode::InvalidResponse, "模型没有返回文字回复。");
+        return with_finish_reason(std::move(*transfer.failure));
+      if (transfer.response.reply.empty() && (!request.prefix || request.prefix->content.empty()) &&
+          transfer.response.finish_reason != FinishReason::Refusal
+          && transfer.response.finish_reason != FinishReason::Length)
+        return with_finish_reason(Failure(ErrorCode::InvalidResponse, "模型没有返回文字回复。"));
       return std::move(transfer.response);
     }
     catch (const std::domain_error &)

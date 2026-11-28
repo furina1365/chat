@@ -33,21 +33,26 @@ struct ModelConfig
   std::optional<double> temperature;
   std::optional<double> top_p;
 
-  // config.json 的 models 数组中的 timeout_ms、connect_timeout_ms 和 max_response_bytes。
   // timeout 是调用总时长；客户端开始调用时据此计算 deadline。
   std::chrono::milliseconds timeout{60000};
   std::chrono::milliseconds connect_timeout{10000};
+  std::optional<std::chrono::milliseconds> stream_idle_timeout;
+
+  // 普通响应体、流式响应体和单条 SSE 事件缓冲的字节上限。
   std::size_t max_response_bytes = 4 * 1024 * 1024;
+  std::size_t max_stream_bytes = 64 * 1024 * 1024;
+  std::size_t max_sse_event_bytes = 256 * 1024;
 };
 
-// 前端仅获取这两个字段，显示为 provider/model。
 struct ModelInfo
 {
   std::string provider;
   std::string model;
+  bool supports_reasoning_effort;
 };
 
 enum class Role { System, Developer, User, Assistant };
+enum class ReasoningEffort { High, Max };
 
 struct Message
 {
@@ -55,9 +60,17 @@ struct Message
   std::string content;
 };
 
+struct AssistantPrefix
+{
+  std::string content;
+  std::string reasoning;
+};
+
 struct ChatRequest
 {
   std::vector<Message> messages;
+  std::optional<ReasoningEffort> reasoning_effort;
+  std::optional<AssistantPrefix> prefix;
 };
 
 enum class FinishReason { Stop, Length, Refusal, Other };
@@ -76,7 +89,8 @@ using TextSink = std::function<bool(const std::string &)>;
 enum class ErrorCode
 {
   InvalidRequest, UnsupportedFeature, Authentication, RateLimited,
-  Timeout, Cancelled, Transport, Upstream, InvalidResponse, ResourceLimit, Internal
+  Timeout, ConnectTimeout, StreamIdleTimeout, Cancelled, Transport, Upstream,
+  InvalidResponse, ResourceLimit, Internal
 };
 
 struct Error
@@ -85,6 +99,7 @@ struct Error
   std::string message; // 脱敏说明，不直接暴露密钥或上游原始错误体。
   std::optional<int> http_status;
   std::string request_id;
+  std::optional<FinishReason> finish_reason = std::nullopt;
 };
 
 template <typename T>

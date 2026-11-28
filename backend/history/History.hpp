@@ -3,6 +3,7 @@
 #include "Types.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -48,21 +49,30 @@ namespace history
     // 一个短事务保存用户消息和生成中的助手占位；request_id 用于幂等重试。
     // 同一 request_id 携带不同内容返回 Conflict。
     Result<Turn> BeginTurn(UserId user_id, ConversationId conversation_id,
-                           const std::string &request_id, const std::string &content);
+                           const std::string &request_id, const std::string &content,
+                           const GenerationModel &model);
     // 为原问题创建新的助手回答，生成完成前保留原回答。
     Result<Turn> Regenerate(UserId user_id, ConversationId conversation_id,
-                            MessageId user_message_id, const std::string &request_id);
+                            MessageId user_message_id, const std::string &request_id,
+                            const GenerationModel &model);
+    // Reopen the current reply at the revision observed by the caller.
+    Result<Turn> Continue(UserId user_id, ConversationId conversation_id,
+                          MessageId assistant_message_id, const std::string &revision,
+                          const std::string &request_id,
+                          const std::function<bool(const GenerationModel &)> &supports_prefix);
     // sequence 防止乱序快照覆盖新内容，终态消息不能被旧进度重新置为生成中。
     // 对终态写入进度返回 Conflict，调用方应停止旧生成任务。
     Status SaveProgress(UserId user_id, ConversationId conversation_id,
-                        MessageId assistant_message_id, const Progress &progress);
+                        MessageId assistant_message_id, const std::string &generation_id,
+                        const Progress &progress);
     // 在生成活跃期间续期当前生成租约，不改动消息内容或 sequence。
     // 若消息已结束、租约已过期或已被其他生成接管，返回 Conflict。
     Status RenewLease(UserId user_id, ConversationId conversation_id,
-                      MessageId assistant_message_id);
+                      MessageId assistant_message_id, const std::string &generation_id);
     // completion.state 只允许 Completed、Interrupted 或 Failed。
     Status Finish(UserId user_id, ConversationId conversation_id,
-                  MessageId assistant_message_id, const Completion &completion);
+                  MessageId assistant_message_id, const std::string &generation_id,
+                  const Completion &completion);
 
   private:
     struct Impl;

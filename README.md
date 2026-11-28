@@ -38,11 +38,16 @@ python3 scripts/set-admin-password.py
 
 密码以 scrypt 哈希保存在 `auth.admin_password_hash`；留空时关闭管理登录。管理会话闲置一小时过期，更换密码并重启后旧管理会话失效。页面支持按用户名、邮箱或 ID 搜索、分页、修改用户名、停用/启用账号和退出用户全部设备。停用会撤销会话并阻止登录，保留对话记录。
 
-已有数据库升级需执行一次（需 ALTER 权限）：
+已有数据库在升级时按缺失的版本执行对应迁移（需 ALTER 权限）：
 
 ```bash
+# 缺少用户管理字段时执行
 mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/migrations/20261114-admin.sql
+# 升级到支持回复续写的版本时执行
+mysql -h 127.0.0.1 -u example_user -p example_db < backend/db/migrations/20261128-continue-reply.sql
 ```
+
+旧回复沿用原有的历史回放和重新生成操作。续写需要原模型信息，从升级后生成的回复开始记录。
 
 在项目根目录构建并启动：
 
@@ -411,16 +416,42 @@ tar -xzf chat-binary.tar.gz
     "top_p": null,
     "timeout_ms": 60000,
     "connect_timeout_ms": 10000,
-    "max_response_bytes": 4194304
+    "stream_idle_timeout_ms": 60000,
+    "max_response_bytes": 4194304,
+    "max_stream_bytes": 67108864,
+    "max_sse_event_bytes": 262144
   }
 ]
 ```
 
-密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
+密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 返回服务商、模型名和可用的思考强度。采样和输出上限由模型配置管理。`temperature`、`top_p` 及输出上限缺省或为 `null` 时使用上游默认值。Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
 
-超时与大小配置必须为正整数：`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间，`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
+`provider` 为 `deepseek` 且 `api` 为 `openai-completions` 时，`deepseek-flash` 和 `deepseek-v4-pro` 支持在输入区切换 High 和 Max。缺省使用 High，两个档位都启用思考模式。DeepSeek 仍接受的 Flash 旧名称 `deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp` 同样支持该选项。[DeepSeek 模型文档](https://api-docs.deepseek.com/quick_start/pricing/)
 
-两套后端的连接空闲上限均为 30 秒；在 `CMakeLists.txt` 中将 `set(CHAT_LOGGING ON)` 改为 `set(CHAT_LOGGING OFF)` 并重新编译后为 60 秒。从最近一次客户端读取计时，配置更长的模型超时也不能突破这一连接限制。
+超时与大小配置必须为正整数。`timeout_ms` 限制单次上游调用的总时长，默认 60 秒。`connect_timeout_ms` 限制 DNS 解析和连接建立，默认 10 秒。`stream_idle_timeout_ms` 配置后限制连接建立到收到首个响应体字节的时间，以及后续两次收到响应体字节之间的时间。上游 SSE 心跳重置空闲计时，服务端发给浏览器的心跳维持下游连接。省略该字段时沿用连接和总时限。
+
+| 大小配置 | 计量范围 | 默认值 | 最大值 |
+| --- | --- | --- | --- |
+| `max_response_bytes` | 非 SSE 上游响应体 | 4 MiB | 64 MiB |
+| `max_stream_bytes` | 上游 SSE 响应体累计字节，含事件包装、元数据和心跳 | 64 MiB | 256 MiB |
+| `max_sse_event_bytes` | 解析单条上游 SSE 事件时的缓冲 | 256 KiB | 512 KiB |
+
+正文与思考解包后合计最多 4 MiB（UTF-8 字节），与历史存储上限一致。超出任一 SSE 上限时结束生成，历史保留已接收的合规增量并记录超限原因。已有配置若使用 `max_response_bytes` 控制 SSE 流大小，可改用 `max_stream_bytes`。
+
+DeepSeek 长回复示例在 `models` 中配置 10 分钟总时限与 60 秒流式空闲时限。
+
+```json
+{
+  "provider": "deepseek",
+  "api": "openai-completions",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "api_key": "replace-with-your-deepseek-api-key",
+  "timeout_ms": 600000,
+  "connect_timeout_ms": 10000,
+  "stream_idle_timeout_ms": 60000
+}
+```
 
 ## 接口
 

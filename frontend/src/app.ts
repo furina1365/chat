@@ -1,5 +1,5 @@
 import { $, formInput } from './dom';
-import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningView, Registration, User } from './types';
+import type { AccountView, AuthMode, ChatRequest, Conversation, DeviceSession, GetResponses, HistoryCursor, Message, Model, PendingContinue, PendingRegenerate, PendingReply, PendingSend, PostContracts, ReasoningEffort, ReasoningView, Registration, User } from './types';
 import type * as MarkdownRenderer from './markdown';
 
 declare global {
@@ -19,16 +19,23 @@ const status = $('#status');
 const retryButton = $('#retry');
 const modelSelect = $('#model-select');
 const modelMenu = $('#model-menu');
+const modelOptions = $('#model-options');
+const modelOptionsToggle = $<HTMLButtonElement>('#model-options-toggle');
+const effortOptions = $('#effort-options');
+const effortControl = $('#effort-control');
+const effortSlider = $<HTMLInputElement>('#effort-slider');
 const stopButton = $('#stop');
 let models: Model[] = [];
 let modelError = '';
 let defaultModel: Model | null = null;
+let defaultReasoningEffort: ReasoningEffort | undefined;
+let choosingModel = false;
 let streamFrame: number | null = null;
 let streamElement: HTMLElement | null = null;
 const scrollArea = $('#conversation-scroll');
 const pending = new Map<string | null, PendingReply>();
 const pendingSends = new Map<string, PendingSend>();
-const pendingRegenerates = new Map<string, PendingRegenerate>();
+const pendingReplyActions = new Map<string, PendingRegenerate | PendingContinue>();
 const selectingBranches = new Set<string>();
 const failures = new Map<string | null, string>();
 const notices = new Map<string | null, string>();
@@ -161,10 +168,10 @@ function signedOut(message = '') {
   ++authEpoch;
   for (const flight of pending.values()) flight.controller.abort();
   for (const timer of polling.values()) clearTimeout(timer);
-  polling.clear(); pending.clear(); pendingSends.clear(); pendingRegenerates.clear(); drafts.clear(); failures.clear(); notices.clear();
+  polling.clear(); pending.clear(); pendingSends.clear(); pendingReplyActions.clear(); drafts.clear(); failures.clear(); notices.clear();
   selectingBranches.clear(); conversationErrors.clear(); conversationLoad = null;
   creatingConversation = null; createError = '';
-  conversations = []; activeId = null; models = []; defaultModel = null;
+  conversations = []; activeId = null; models = []; defaultModel = null; defaultReasoningEffort = undefined;
   prompt.value = ''; formError = ''; historyError = ''; modelError = '';
   closeAccount(false);
   $('#password-form').reset(); $('#email-form').reset(); $('#email-verify-form').reset();
@@ -235,9 +242,7 @@ function applyConversation(conversation: Conversation, data: GetResponses[`/api/
   conversationErrors.delete(conversation.id);
   Object.assign(conversation, data.conversation, { loaded: true });
   updateConversationMessages(conversation, data.messages);
-  const last = conversation.messages.at(-1);
-  if (last?.error) failures.set(conversation.id, last.error);
-  else failures.delete(conversation.id);
+  failures.delete(conversation.id);
   scheduleConversationPoll(conversation);
 }
 
@@ -659,7 +664,7 @@ function forgetConversation(id: string, message = '') {
   pending.get(id)?.controller.abort();
   pending.delete(id);
   pendingSends.delete(id);
-  pendingRegenerates.delete(id);
+  pendingReplyActions.delete(id);
   failures.delete(id);
   notices.delete(id);
   drafts.delete(id);
@@ -793,9 +798,12 @@ function latestQuestionId(conversation: Conversation): string | undefined {
   return question?.role === 'user' ? question.id : undefined;
 }
 
-function matchingPendingRegenerate(conversation: Conversation): PendingRegenerate | undefined {
-  const request = pendingRegenerates.get(conversation.id);
-  return request && request.questionId === latestQuestionId(conversation) ? request : undefined;
+function matchingPendingReplyAction(conversation: Conversation) {
+  const request = pendingReplyActions.get(conversation.id);
+  if (!request) return;
+  if ('questionId' in request) return request.questionId === latestQuestionId(conversation) ? request : undefined;
+  const last = conversation.messages.at(-1);
+  return request.answerId === last?.id && request.revision === last.continue_from ? request : undefined;
 }
 
 function conversationBusy(conversation: Conversation) {
@@ -903,10 +911,23 @@ function createMessageView(conversation: Conversation, message: Message) {
     actions.append(copy);
     const regenerate = document.createElement('button');
     regenerate.className = 'regenerate-button';
-    regenerate.title = '重新生成这条回复';
-    regenerate.setAttribute('aria-label', '重新生成这条回复');
+    const emptyFailure = message.state === 'failed' && !message.content && !message.reasoning;
+    regenerate.title = emptyFailure ? '重新生成' : '重新生成这条回复';
+    regenerate.setAttribute('aria-label', regenerate.title);
     regenerate.append(icon('retry'));
+    if (emptyFailure) {
+      regenerate.classList.add('regenerate-empty');
+      regenerate.append('重新生成');
+    }
     regenerate.addEventListener('click', () => regenerateReply(conversation));
+    if (message.continue_from) {
+      const continueButton = document.createElement('button');
+      continueButton.type = 'button';
+      continueButton.className = 'continue-button';
+      continueButton.textContent = '继续生成';
+      continueButton.addEventListener('click', () => continueReply(conversation, message));
+      actions.append(continueButton);
+    }
     actions.append(regenerate);
     const versions = replyVersionPicker(conversation, message);
     if (versions) actions.append(versions);
@@ -917,12 +938,12 @@ function createMessageView(conversation: Conversation, message: Message) {
       article.append(reasoningBlock(message, message.reasoning, state));
     }
     if (message.content) article.append(content);
-    if (message.truncated || interrupted) {
+    if (message.error || message.truncated || interrupted) {
       const note = document.createElement('p');
       note.className = 'truncated-note';
-      note.textContent = interrupted
+      note.textContent = message.error || (interrupted
         ? message.state ? '生成已中断，以上是已收到的内容。' : '接收已中断，以上是已收到的内容。'
-        : '回复达到长度限制，可以发送“请继续”。';
+        : '回复达到长度限制。');
       article.append(note);
     }
     article.append(actions);
@@ -936,7 +957,9 @@ function renderMessages() {
   if (conversation) {
     const busy = conversationBusy(conversation);
     const last = conversation.messages.at(-1);
+    const continueId = pending.get(conversation.id)?.continueId;
     for (const message of conversation.messages) {
+      if (continueId && message.id === continueId) continue;
       let article = messageViews.get(message);
       if (!article) {
         article = createMessageView(conversation, message);
@@ -946,6 +969,11 @@ function renderMessages() {
         const regenerate = article.querySelector<HTMLButtonElement>('.regenerate-button')!;
         regenerate.hidden = message !== last;
         regenerate.disabled = busy;
+        const continuation = article.querySelector<HTMLButtonElement>('.continue-button');
+        if (continuation) {
+          continuation.hidden = message !== last;
+          continuation.disabled = busy;
+        }
         if (message.versions && message.versions.total > 1) {
           article.querySelector<HTMLButtonElement>('.reply-version-previous')!.disabled = busy || !message.versions.previous_id;
           article.querySelector<HTMLButtonElement>('.reply-version-next')!.disabled = busy || !message.versions.next_id;
@@ -970,9 +998,10 @@ function renderPendingReply() {
   streamElement?.remove();
   streamElement = null;
   const flight = pending.get(activeId);
-  if (flight?.text || flight?.reasoning) {
+  if (flight && (flight.text || flight.reasoning || flight.continueId)) {
     const article = document.createElement('article');
     article.className = 'message assistant streaming';
+    if (flight.continueId) article.dataset.messageId = flight.continueId;
     article.setAttribute('aria-label', 'AI 正在回复');
     const content = document.createElement('div');
     content.className = 'message-content';
@@ -1000,13 +1029,13 @@ function updateComposer() {
   const waiting = pending.has(activeId);
   const flight = pending.get(activeId);
   const thinking = flight?.reasoning && !flight.text;
-  const saving = Boolean(flight && !flight.assistantId && !flight.regenerate);
+  const saving = Boolean(flight && !flight.assistantId && !flight.regenerate && !flight.continueId);
   const unanswered = conversation?.messages.at(-1)?.role === 'user';
   const remote = isGenerating(conversation);
   const selecting = Boolean(conversation && selectingBranches.has(conversation.id));
   const activeUnsent = matchingPendingSend(activeId);
   const uncertainSend = activeUnsent?.rejected ? undefined : activeUnsent;
-  const activeRegenerate = !activeUnsent && conversation ? matchingPendingRegenerate(conversation) : undefined;
+  const activeReplyAction = !activeUnsent && conversation ? matchingPendingReplyAction(conversation) : undefined;
   prompt.disabled = !currentUser || loading || unloaded || creating || waiting || remote || selecting || Boolean(unanswered);
   prompt.placeholder = loading || unloaded ? '等待对话加载' : thinking ? '正在思考…' : creating ? '正在创建对话…' : saving ? '正在发送…' : waiting ? '正在等待回复…' : unanswered ? '重试上一条消息，或新建对话' : '有什么我可以帮你？';
   const chosen = selectedModel();
@@ -1014,19 +1043,20 @@ function updateComposer() {
   stopButton.hidden = !waiting;
   stopButton.disabled = Boolean(flight?.stopped || flight?.finished);
   sendButton.disabled = prompt.disabled || !prompt.value.trim() || !chosen || Boolean(uncertainSend);
-  modelSelect.disabled = loading || unloaded || creating || waiting || selecting || !models.length;
+  modelSelect.disabled = loading || unloaded || creating || selecting || !models.length;
   if (modelSelect.disabled) closeModelMenu();
   messagesElement.setAttribute('aria-busy', String(waiting || remote || loading || (unloaded && !detailError)));
   const canRetryCreate = activeId === null && Boolean(createError && prompt.value.trim());
   const canRetryLoad = Boolean(detailError);
   const canRetrySaved = !activeUnsent && (unanswered || (failures.has(activeId) && Boolean(conversation?.messages.at(-1))));
   const canResendDraft = activeUnsent?.rejected && chosen && !remote;
-  const canRetrySend = !remote && (uncertainSend || canResendDraft || activeRegenerate || canRetryCreate || canRetrySaved);
+  const canRetrySend = !remote && (uncertainSend || canResendDraft || activeReplyAction || canRetryCreate || canRetrySaved);
   retryButton.hidden = loading || creating || waiting || selecting || !(canRetryLoad || canRetrySend);
-  const retryModel = canRetrySend ? (uncertainSend ?? activeRegenerate)?.model : undefined;
-  retryButton.textContent = retryModel ? '重试原请求' : canRetryLoad && !canResendDraft ? '刷新对话' : '重试';
+  const originalRequest = canRetrySend ? uncertainSend ?? activeReplyAction : undefined;
+  const retryModel = originalRequest && 'model' in originalRequest ? originalRequest.model : undefined;
+  retryButton.textContent = originalRequest ? '重试原请求' : canRetryLoad && !canResendDraft ? '刷新对话' : '重试';
   retryButton.title = retryModel ? `使用原请求重试（${retryModel.provider} / ${retryModel.model}）` : '';
-  const error = formError || activeUnsent?.error || activeRegenerate?.error || failures.get(activeId)
+  const error = formError || activeUnsent?.error || activeReplyAction?.error || failures.get(activeId)
     || (activeId === null ? createError : detailError) || modelError || historyError;
   const notice = notices.get(activeId) || '';
   status.classList.toggle('error', Boolean(error));
@@ -1075,17 +1105,45 @@ function selectedModel(conversation = currentConversation()) {
   const choice = conversation?.provider ? conversation : defaultModel;
   return models.find((model) => choice && model.provider === choice.provider && model.model === choice.model) || null;
 }
+function selectedReasoningEffort(model: Model, conversation = currentConversation()): ReasoningEffort | undefined {
+  const effort = conversation?.provider ? conversation.reasoningEffort : defaultReasoningEffort;
+  return effort && model.reasoning_efforts?.includes(effort) ? effort : model.reasoning_efforts?.[0];
+}
 function syncModelSelect() {
-  closeModelMenu();
   const chosen = selectedModel();
-  const label = chosen ? `${chosen.provider} / ${chosen.model}` :
+  const effort = chosen ? selectedReasoningEffort(chosen) : undefined;
+  const modelLabel = chosen ? `${chosen.provider} / ${chosen.model}` :
     models.length ? '模型不可用' : modelError ? '模型加载失败' : '正在加载模型…';
-  $('#model-label').textContent = label;
+  const effortLabel = effort === 'max' ? 'Max' : 'High';
+  const label = effort ? `${modelLabel} · ${effortLabel}` : modelLabel;
+  $('#model-label').textContent = modelLabel;
+  const modelEffort = $('#model-effort-label');
+  modelEffort.hidden = !effort;
+  modelEffort.textContent = effortLabel;
   modelSelect.title = label;
-  modelSelect.setAttribute('aria-label', `选择模型：${label}`);
-  for (const option of modelMenu.children) {
-    option.setAttribute('aria-selected', String(chosen !== null && option.getAttribute('data-key') === modelKey(chosen)));
+  modelSelect.setAttribute('aria-label', `选择模型和思考强度：${label}`);
+  const key = chosen ? modelKey(chosen) : null;
+  for (const option of modelOptions.querySelectorAll('button')) {
+    option.setAttribute('aria-pressed', String(option.value === key));
   }
+  modelOptions.hidden = Boolean(effort) && !choosingModel;
+  effortOptions.hidden = !effort;
+  modelOptionsToggle.setAttribute('aria-expanded', String(!modelOptions.hidden));
+  modelOptionsToggle.setAttribute('aria-label', `切换模型：${modelLabel}`);
+  modelOptionsToggle.title = modelLabel;
+  $('#effort-model-label').textContent = chosen?.model ?? '';
+  $('#effort-label').textContent = effortLabel;
+  const efforts = chosen?.reasoning_efforts;
+  effortControl.hidden = choosingModel || !efforts?.includes('high') || !efforts.includes('max');
+  effortSlider.value = effort === 'max' ? '1' : '0';
+  effortSlider.setAttribute('aria-valuetext', effortLabel);
+  effortSlider.classList.toggle('max', effort === 'max');
+  positionModelMenu();
+}
+
+function focusModelOption() {
+  (modelOptions.querySelector<HTMLButtonElement>('[aria-pressed="true"]') ||
+    modelOptions.querySelector<HTMLButtonElement>('button'))?.focus();
 }
 
 function closeModelMenu() {
@@ -1094,9 +1152,19 @@ function closeModelMenu() {
 }
 
 function openModelMenu() {
-  if (modelSelect.disabled) return;
+  if (modelSelect.disabled || modelMenu.matches(':popover-open')) return;
+  choosingModel = false;
+  syncModelSelect();
   modelMenu.showPopover({ source: modelSelect });
   modelSelect.setAttribute('aria-expanded', 'true');
+  positionModelMenu();
+  if (effortOptions.hidden) focusModelOption();
+  else if (effortControl.hidden) modelOptionsToggle.focus();
+  else effortSlider.focus();
+}
+
+function positionModelMenu() {
+  if (!modelMenu.matches(':popover-open')) return;
   const trigger = modelSelect.getBoundingClientRect();
   const gap = 8;
   const above = trigger.top - gap - 12;
@@ -1106,33 +1174,41 @@ function openModelMenu() {
   const menu = modelMenu.getBoundingClientRect();
   modelMenu.style.left = `${Math.max(12, Math.min(trigger.right - menu.width, window.innerWidth - menu.width - 12))}px`;
   modelMenu.style.top = `${openAbove ? trigger.top - gap - menu.height : trigger.bottom + gap}px`;
-  (modelMenu.querySelector<HTMLElement>('[aria-selected="true"]') || modelMenu.querySelector<HTMLElement>(':scope > :first-child'))?.focus();
 }
 
 function renderModelOptions() {
-  modelMenu.replaceChildren();
+  modelOptions.querySelectorAll('button').forEach((button) => button.remove());
   for (const model of models) {
     const option = document.createElement('button');
     option.type = 'button';
+    option.value = modelKey(model);
     option.className = 'model-option';
-    option.setAttribute('role', 'option');
-    option.setAttribute('aria-label', `${model.provider} / ${model.model}`);
     option.title = `${model.provider} / ${model.model}`;
-    option.tabIndex = -1;
-    option.dataset.key = modelKey(model);
     const name = document.createElement('span');
     name.className = 'model-option-name';
-    name.textContent = model.model;
+    name.textContent = option.title;
     option.append(name, icon('check'));
     option.addEventListener('click', () => {
       const conversation = currentConversation();
-      if (conversation) { conversation.provider = model.provider; conversation.model = model.model;  }
-      else defaultModel = model;
+      if (option.getAttribute('aria-pressed') !== 'true') {
+        if (conversation) {
+          conversation.provider = model.provider;
+          conversation.model = model.model;
+          conversation.reasoningEffort = undefined;
+        } else {
+          defaultModel = model;
+          defaultReasoningEffort = undefined;
+        }
+      }
+      choosingModel = false;
       syncModelSelect();
       updateComposer();
-      modelSelect.focus();
+      if (effortOptions.hidden) {
+        closeModelMenu();
+        modelSelect.focus();
+      } else modelOptionsToggle.focus();
     });
-    modelMenu.append(option);
+    modelOptions.append(option);
   }
 }
 async function loadModels() {
@@ -1140,10 +1216,17 @@ async function loadModels() {
   try {
     const data = await api('/api/models');
     if (!Array.isArray(data.models) || !data.models.length || !data.models.every((item) =>
-      typeof item.provider === 'string' && typeof item.model === 'string')) throw new Error('没有可用模型，请检查后端配置。');
+      typeof item.provider === 'string' && typeof item.model === 'string' &&
+      (item.reasoning_efforts === undefined || (Array.isArray(item.reasoning_efforts) &&
+        item.reasoning_efforts.every((effort) => effort === 'high' || effort === 'max'))))) {
+      throw new Error('没有可用模型，请检查后端配置。');
+    }
     models = data.models;
     const defaultKey = defaultModel ? modelKey(defaultModel) : null;
-    if (!models.some((model) => modelKey(model) === defaultKey)) defaultModel = models[0] ?? null;
+    if (!models.some((model) => modelKey(model) === defaultKey)) {
+      defaultModel = models[0] ?? null;
+      defaultReasoningEffort = undefined;
+    }
     renderModelOptions();
   } catch (error) {
     if (!currentUser || errorCode(error) === 'session_changed') return;
@@ -1166,23 +1249,51 @@ modelSelect.addEventListener('keydown', (event) => {
 modelMenu.addEventListener('toggle', (event) => {
   modelSelect.setAttribute('aria-expanded', String(event.newState === 'open'));
 });
+modelOptionsToggle.addEventListener('click', () => {
+  choosingModel = !choosingModel;
+  syncModelSelect();
+  if (choosingModel) focusModelOption();
+});
+effortSlider.addEventListener('input', () => {
+  const effort = effortSlider.valueAsNumber === 1 ? 'max' : 'high';
+  const conversation = currentConversation();
+  const model = selectedModel(conversation);
+  if (!model?.reasoning_efforts?.includes(effort)) return;
+  if (conversation) {
+    conversation.provider = model.provider;
+    conversation.model = model.model;
+    conversation.reasoningEffort = effort;
+  } else defaultReasoningEffort = effort;
+  syncModelSelect();
+});
 modelMenu.addEventListener('keydown', (event) => {
-  const options = [...modelMenu.querySelectorAll<HTMLButtonElement>(':scope > button')];
-  const index = options.findIndex(option => option === document.activeElement);
-  let next;
-  if (event.key === 'ArrowDown') next = (index + 1) % options.length;
-  else if (event.key === 'ArrowUp') next = (index - 1 + options.length) % options.length;
-  else if (event.key === 'Home') next = 0;
-  else if (event.key === 'End') next = options.length - 1;
-  else if (event.key === 'Escape' || event.key === 'Tab') {
+  if (event.key === 'Escape') {
+    event.preventDefault();
     closeModelMenu();
     modelSelect.focus();
-  }
-  if (next !== undefined) {
+  } else if (event.key === 'Enter' && event.target === effortSlider) {
     event.preventDefault();
-    options[next]?.focus();
   }
 });
+modelOptions.addEventListener('keydown', (event) => {
+  const options = [...modelOptions.querySelectorAll('button')];
+  const index = options.findIndex((option) => option === event.target);
+  if (index === -1) return;
+  let next = index;
+  if (event.key === 'ArrowUp') next = (index + options.length - 1) % options.length;
+  else if (event.key === 'ArrowDown') next = (index + 1) % options.length;
+  else if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = options.length - 1;
+  else return;
+  event.preventDefault();
+  options[next]?.focus();
+});
+modelMenu.addEventListener('focusout', (event) => {
+  if (event.relatedTarget instanceof Node && event.relatedTarget !== modelSelect && !modelMenu.contains(event.relatedTarget)) {
+    closeModelMenu();
+  }
+});
+window.addEventListener('resize', positionModelMenu);
 $('#reload-models').addEventListener('click', loadModels);
 stopButton.addEventListener('click', () => {
   const flight = pending.get(activeId);
@@ -1276,11 +1387,23 @@ function regenerateReply(conversation: Conversation) {
     updateComposer();
     return;
   }
-  return requestReply(conversation, { questionId, previousAssistantId: previousAnswer?.id, model, requestId: makeId(), error: '' });
+  return requestReply(conversation, {
+    questionId, previousAssistantId: previousAnswer?.id, model,
+    reasoningEffort: selectedReasoningEffort(model, conversation), requestId: makeId(), error: '',
+  });
+}
+
+function continueReply(conversation: Conversation, message: Message) {
+  if (!message.id || !message.continue_from || conversation.messages.at(-1) !== message) return;
+  const previous = matchingPendingReplyAction(conversation);
+  if (previous && 'answerId' in previous) return requestReply(conversation, previous, true);
+  return requestReply(conversation, {
+    answerId: message.id, revision: message.continue_from, requestId: makeId(), error: '',
+  });
 }
 
 function reconcileUnconfirmedReply(
-  conversation: Conversation, request: PendingSend | PendingRegenerate, error: ApiError,
+  conversation: Conversation, request: PendingSend | PendingRegenerate | PendingContinue, error: ApiError,
   refreshed: boolean, retry: boolean,
 ) {
   const { id } = conversation;
@@ -1313,7 +1436,12 @@ function reconcileUnconfirmedReply(
       request.rejected = true;
     }
   } else {
-    pendingRegenerates.delete(id);
+    pendingReplyActions.delete(id);
+    if ('answerId' in request) {
+      if (!refreshed) failures.set(id, request.error);
+      else if (answer?.continue_from === request.revision) formError = request.error;
+      return;
+    }
     const completedDuringRetry = existingRequest && answer?.role === 'assistant' && answer.state === 'completed'
       && answer.id !== request.previousAssistantId;
     if (!completedDuringRetry && latestQuestionId(conversation) === request.questionId) {
@@ -1322,29 +1450,35 @@ function reconcileUnconfirmedReply(
   }
 }
 
-async function requestReply(conversation: Conversation, request: PendingSend | PendingRegenerate, retry = false) {
+async function requestReply(conversation: Conversation, request: PendingSend | PendingRegenerate | PendingContinue, retry = false) {
   const id = conversation.id;
   if (conversationBusy(conversation)) return;
   request.error = '';
   if ('content' in request) pendingSends.set(id, request);
-  else pendingRegenerates.set(id, request);
-  const { provider, model } = request.model;
-  const requestBody: ChatRequest = {
-    provider, model, stream: true, conversation_id: id, request_id: request.requestId,
-    ...('content' in request ? { content: request.content } : { regenerate_message_id: request.questionId }),
-  };
+  else pendingReplyActions.set(id, request);
+  const base = { stream: true, conversation_id: id, request_id: request.requestId };
+  const continuing = 'answerId' in request;
+  const prefix = continuing ? conversation.messages.at(-1) : undefined;
+  const requestBody: ChatRequest = continuing
+    ? { ...base, continue_message_id: request.answerId, continue_from: request.revision }
+    : {
+      ...base, provider: request.model.provider, model: request.model.model, reasoning_effort: request.reasoningEffort,
+      ...('content' in request ? { content: request.content } : { regenerate_message_id: request.questionId }),
+    };
 
   const epoch = authEpoch;
   const flight: PendingReply = {
-    controller: new AbortController(), text: '', reasoning: '',
-    regenerate: 'questionId' in request, stopped: false, finished: false,
+    controller: new AbortController(), text: prefix?.content || '', reasoning: prefix?.reasoning || '',
+    regenerate: 'questionId' in request, continueId: continuing ? request.answerId : undefined,
+    stopped: false, finished: false,
   };
   pending.set(id, flight);
   failures.delete(id); notices.delete(id); conversationErrors.delete(id);
   if (activeId === id) formError = '';
-  if (!retry) {
-    conversation.provider = provider;
-    conversation.model = model;
+  if (!retry && !continuing) {
+    conversation.provider = request.model.provider;
+    conversation.model = request.model.model;
+    conversation.reasoningEffort = request.reasoningEffort;
   }
 
   if (activeId === id) {
@@ -1374,13 +1508,18 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
       if (event === 'meta') {
         if (typeof data.user_message_id !== 'string' || typeof data.assistant_message_id !== 'string') throw new Error('回复消息 ID 异常。');
         flight.assistantId = data.assistant_message_id;
+        if (continuing && flight.assistantId !== request.answerId) throw new Error('回复消息 ID 异常。');
         if ('content' in request) {
           clearConfirmedSend(id, request);
           if (!retry && !conversation.messages.some((message) => message.id === data.user_message_id)) {
             conversation.messages.push({ id: data.user_message_id, role: 'user', state: 'completed', content: request.content });
           }
-        } else if (pendingRegenerates.get(id) === request) {
-          pendingRegenerates.delete(id);
+        } else if (pendingReplyActions.get(id) === request) {
+          pendingReplyActions.delete(id);
+        }
+        if (continuing && data.snapshot === true) {
+          flight.finished = true;
+          return true;
         }
         if (activeId === id) renderReplyProgress();
       }
@@ -1404,9 +1543,17 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
         if (!flight.text.trim() && data.finish_reason !== 'refusal') throw new Error('没有收到有效回复，请重试。');
         flight.finished = true;
         // 同一请求的回放可能来自其他分支，当前分支由历史接口更新。
-        if (!retry) {
-          const reply: Message = { id: flight.assistantId, state: 'completed', role: 'assistant', content: flight.text || '模型拒绝回答此问题。', reasoning: flight.reasoning, truncated: data.truncated === true };
-          if (flight.regenerate && conversation.messages.at(-1)?.role === 'assistant') conversation.messages[conversation.messages.length - 1] = reply;
+        if (!retry || continuing) {
+          const reply: Message = {
+            ...prefix, id: flight.assistantId, state: 'completed', role: 'assistant',
+            content: flight.text || '模型拒绝回答此问题。', reasoning: flight.reasoning,
+            finish_reason: data.finish_reason, truncated: data.truncated === true,
+            error: '', interrupted: false, continue_from: undefined,
+          };
+          const last = conversation.messages.at(-1);
+          if (continuing) {
+            if (last?.id === flight.continueId) conversation.messages[conversation.messages.length - 1] = reply;
+          } else if (flight.regenerate && last?.role === 'assistant') conversation.messages[conversation.messages.length - 1] = reply;
           else conversation.messages.push(reply);
         }
         if (activeId === id) updateComposer();
@@ -1427,7 +1574,14 @@ async function requestReply(conversation: Conversation, request: PendingSend | P
     catch (error) {
       if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
       recordConversationError(id, error);
-      if (!retry && !flight.regenerate && !flight.finished && flight.assistantId && (flight.text || flight.reasoning)) {
+      const last = conversation.messages.at(-1);
+      if (continuing && !flight.finished && flight.assistantId && last?.id === flight.continueId) {
+        conversation.messages[conversation.messages.length - 1] = {
+          ...last, role: 'assistant', content: flight.text, reasoning: flight.reasoning, state: 'interrupted',
+          interrupted: true, error: savedFlightError, continue_from: undefined,
+        };
+      } else if (!continuing && !retry && !flight.regenerate && !flight.finished && flight.assistantId
+        && (flight.text || flight.reasoning)) {
         conversation.messages.push({ role: 'assistant', content: flight.text, reasoning: flight.reasoning, interrupted: true });
       }
     }
@@ -1463,6 +1617,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
   if (!text || prompt.disabled || !model || (existing && !existing.rejected) || (conversation && conversationBusy(conversation))
     || (!conversation && (activeId !== null || creatingConversation))) return;
   if (!validateChatContext([...(conversation?.messages || []), { content: text }])) return;
+  const reasoningEffort = selectedReasoningEffort(model, conversation);
   const epoch = authEpoch;
   if (!conversation) {
     const creation = { draftVersion: newDraftVersion };
@@ -1495,7 +1650,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
     }
   }
   const send: PendingSend = {
-    content: text, raw, model, requestId: makeId(), error: '',
+    content: text, raw, model, reasoningEffort, requestId: makeId(), error: '',
     parentId: conversation.messages.at(-1)?.id ?? conversation.current_message_id,
   };
   drafts.set(conversation.id, raw);
@@ -1537,9 +1692,9 @@ retryButton.addEventListener('click', () => {
       void requestReply(conversation, unsent, true);
       return;
     }
-    const regenerate = matchingPendingRegenerate(conversation);
-    if (regenerate) {
-      void requestReply(conversation, regenerate, true);
+    const action = matchingPendingReplyAction(conversation);
+    if (action) {
+      void requestReply(conversation, action, true);
       return;
     }
   }

@@ -30,16 +30,23 @@
   var retryButton = $("#retry");
   var modelSelect = $("#model-select");
   var modelMenu = $("#model-menu");
+  var modelOptions = $("#model-options");
+  var modelOptionsToggle = $("#model-options-toggle");
+  var effortOptions = $("#effort-options");
+  var effortControl = $("#effort-control");
+  var effortSlider = $("#effort-slider");
   var stopButton = $("#stop");
   var models = [];
   var modelError = "";
   var defaultModel = null;
+  var defaultReasoningEffort;
+  var choosingModel = false;
   var streamFrame = null;
   var streamElement = null;
   var scrollArea = $("#conversation-scroll");
   var pending = /* @__PURE__ */ new Map();
   var pendingSends = /* @__PURE__ */ new Map();
-  var pendingRegenerates = /* @__PURE__ */ new Map();
+  var pendingReplyActions = /* @__PURE__ */ new Map();
   var selectingBranches = /* @__PURE__ */ new Set();
   var failures = /* @__PURE__ */ new Map();
   var notices = /* @__PURE__ */ new Map();
@@ -181,7 +188,7 @@
     polling.clear();
     pending.clear();
     pendingSends.clear();
-    pendingRegenerates.clear();
+    pendingReplyActions.clear();
     drafts.clear();
     failures.clear();
     notices.clear();
@@ -194,6 +201,7 @@
     activeId = null;
     models = [];
     defaultModel = null;
+    defaultReasoningEffort = void 0;
     prompt.value = "";
     formError = "";
     historyError = "";
@@ -271,9 +279,7 @@
     conversationErrors.delete(conversation.id);
     Object.assign(conversation, data.conversation, { loaded: true });
     updateConversationMessages(conversation, data.messages);
-    const last = conversation.messages.at(-1);
-    if (last?.error) failures.set(conversation.id, last.error);
-    else failures.delete(conversation.id);
+    failures.delete(conversation.id);
     scheduleConversationPoll(conversation);
   }
   function isGenerating(conversation) {
@@ -744,7 +750,7 @@
     pending.get(id)?.controller.abort();
     pending.delete(id);
     pendingSends.delete(id);
-    pendingRegenerates.delete(id);
+    pendingReplyActions.delete(id);
     failures.delete(id);
     notices.delete(id);
     drafts.delete(id);
@@ -878,9 +884,12 @@
     const question = last?.role === "assistant" ? conversation.messages.at(-2) : last;
     return question?.role === "user" ? question.id : void 0;
   }
-  function matchingPendingRegenerate(conversation) {
-    const request = pendingRegenerates.get(conversation.id);
-    return request && request.questionId === latestQuestionId(conversation) ? request : void 0;
+  function matchingPendingReplyAction(conversation) {
+    const request = pendingReplyActions.get(conversation.id);
+    if (!request) return;
+    if ("questionId" in request) return request.questionId === latestQuestionId(conversation) ? request : void 0;
+    const last = conversation.messages.at(-1);
+    return request.answerId === last?.id && request.revision === last.continue_from ? request : void 0;
   }
   function conversationBusy(conversation) {
     return !conversation.loaded || conversationLoad?.id === conversation.id || pending.has(conversation.id) || selectingBranches.has(conversation.id) || isGenerating(conversation);
@@ -989,10 +998,23 @@
       actions.append(copy);
       const regenerate = document.createElement("button");
       regenerate.className = "regenerate-button";
-      regenerate.title = "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
-      regenerate.setAttribute("aria-label", "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D");
+      const emptyFailure = message.state === "failed" && !message.content && !message.reasoning;
+      regenerate.title = emptyFailure ? "\u91CD\u65B0\u751F\u6210" : "\u91CD\u65B0\u751F\u6210\u8FD9\u6761\u56DE\u590D";
+      regenerate.setAttribute("aria-label", regenerate.title);
       regenerate.append(icon("retry"));
+      if (emptyFailure) {
+        regenerate.classList.add("regenerate-empty");
+        regenerate.append("\u91CD\u65B0\u751F\u6210");
+      }
       regenerate.addEventListener("click", () => regenerateReply(conversation));
+      if (message.continue_from) {
+        const continueButton = document.createElement("button");
+        continueButton.type = "button";
+        continueButton.className = "continue-button";
+        continueButton.textContent = "\u7EE7\u7EED\u751F\u6210";
+        continueButton.addEventListener("click", () => continueReply(conversation, message));
+        actions.append(continueButton);
+      }
       actions.append(regenerate);
       const versions = replyVersionPicker(conversation, message);
       if (versions) actions.append(versions);
@@ -1002,10 +1024,10 @@
         article.append(reasoningBlock(message, message.reasoning, state));
       }
       if (message.content) article.append(content);
-      if (message.truncated || interrupted) {
+      if (message.error || message.truncated || interrupted) {
         const note = document.createElement("p");
         note.className = "truncated-note";
-        note.textContent = interrupted ? message.state ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u63A5\u6536\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\uFF0C\u53EF\u4EE5\u53D1\u9001\u201C\u8BF7\u7EE7\u7EED\u201D\u3002";
+        note.textContent = message.error || (interrupted ? message.state ? "\u751F\u6210\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u63A5\u6536\u5DF2\u4E2D\u65AD\uFF0C\u4EE5\u4E0A\u662F\u5DF2\u6536\u5230\u7684\u5185\u5BB9\u3002" : "\u56DE\u590D\u8FBE\u5230\u957F\u5EA6\u9650\u5236\u3002");
         article.append(note);
       }
       article.append(actions);
@@ -1018,7 +1040,9 @@
     if (conversation) {
       const busy = conversationBusy(conversation);
       const last = conversation.messages.at(-1);
+      const continueId = pending.get(conversation.id)?.continueId;
       for (const message of conversation.messages) {
+        if (continueId && message.id === continueId) continue;
         let article = messageViews.get(message);
         if (!article) {
           article = createMessageView(conversation, message);
@@ -1028,6 +1052,11 @@
           const regenerate = article.querySelector(".regenerate-button");
           regenerate.hidden = message !== last;
           regenerate.disabled = busy;
+          const continuation = article.querySelector(".continue-button");
+          if (continuation) {
+            continuation.hidden = message !== last;
+            continuation.disabled = busy;
+          }
           if (message.versions && message.versions.total > 1) {
             article.querySelector(".reply-version-previous").disabled = busy || !message.versions.previous_id;
             article.querySelector(".reply-version-next").disabled = busy || !message.versions.next_id;
@@ -1051,9 +1080,10 @@
     streamElement?.remove();
     streamElement = null;
     const flight = pending.get(activeId);
-    if (flight?.text || flight?.reasoning) {
+    if (flight && (flight.text || flight.reasoning || flight.continueId)) {
       const article = document.createElement("article");
       article.className = "message assistant streaming";
+      if (flight.continueId) article.dataset.messageId = flight.continueId;
       article.setAttribute("aria-label", "AI \u6B63\u5728\u56DE\u590D");
       const content = document.createElement("div");
       content.className = "message-content";
@@ -1080,13 +1110,13 @@
     const waiting = pending.has(activeId);
     const flight = pending.get(activeId);
     const thinking = flight?.reasoning && !flight.text;
-    const saving = Boolean(flight && !flight.assistantId && !flight.regenerate);
+    const saving = Boolean(flight && !flight.assistantId && !flight.regenerate && !flight.continueId);
     const unanswered = conversation?.messages.at(-1)?.role === "user";
     const remote = isGenerating(conversation);
     const selecting = Boolean(conversation && selectingBranches.has(conversation.id));
     const activeUnsent = matchingPendingSend(activeId);
     const uncertainSend = activeUnsent?.rejected ? void 0 : activeUnsent;
-    const activeRegenerate = !activeUnsent && conversation ? matchingPendingRegenerate(conversation) : void 0;
+    const activeReplyAction = !activeUnsent && conversation ? matchingPendingReplyAction(conversation) : void 0;
     prompt.disabled = !currentUser || loading || unloaded || creating || waiting || remote || selecting || Boolean(unanswered);
     prompt.placeholder = loading || unloaded ? "\u7B49\u5F85\u5BF9\u8BDD\u52A0\u8F7D" : thinking ? "\u6B63\u5728\u601D\u8003\u2026" : creating ? "\u6B63\u5728\u521B\u5EFA\u5BF9\u8BDD\u2026" : saving ? "\u6B63\u5728\u53D1\u9001\u2026" : waiting ? "\u6B63\u5728\u7B49\u5F85\u56DE\u590D\u2026" : unanswered ? "\u91CD\u8BD5\u4E0A\u4E00\u6761\u6D88\u606F\uFF0C\u6216\u65B0\u5EFA\u5BF9\u8BDD" : "\u6709\u4EC0\u4E48\u6211\u53EF\u4EE5\u5E2E\u4F60\uFF1F";
     const chosen = selectedModel();
@@ -1094,19 +1124,20 @@
     stopButton.hidden = !waiting;
     stopButton.disabled = Boolean(flight?.stopped || flight?.finished);
     sendButton.disabled = prompt.disabled || !prompt.value.trim() || !chosen || Boolean(uncertainSend);
-    modelSelect.disabled = loading || unloaded || creating || waiting || selecting || !models.length;
+    modelSelect.disabled = loading || unloaded || creating || selecting || !models.length;
     if (modelSelect.disabled) closeModelMenu();
     messagesElement.setAttribute("aria-busy", String(waiting || remote || loading || unloaded && !detailError));
     const canRetryCreate = activeId === null && Boolean(createError && prompt.value.trim());
     const canRetryLoad = Boolean(detailError);
     const canRetrySaved = !activeUnsent && (unanswered || failures.has(activeId) && Boolean(conversation?.messages.at(-1)));
     const canResendDraft = activeUnsent?.rejected && chosen && !remote;
-    const canRetrySend = !remote && (uncertainSend || canResendDraft || activeRegenerate || canRetryCreate || canRetrySaved);
+    const canRetrySend = !remote && (uncertainSend || canResendDraft || activeReplyAction || canRetryCreate || canRetrySaved);
     retryButton.hidden = loading || creating || waiting || selecting || !(canRetryLoad || canRetrySend);
-    const retryModel = canRetrySend ? (uncertainSend ?? activeRegenerate)?.model : void 0;
-    retryButton.textContent = retryModel ? "\u91CD\u8BD5\u539F\u8BF7\u6C42" : canRetryLoad && !canResendDraft ? "\u5237\u65B0\u5BF9\u8BDD" : "\u91CD\u8BD5";
+    const originalRequest = canRetrySend ? uncertainSend ?? activeReplyAction : void 0;
+    const retryModel = originalRequest && "model" in originalRequest ? originalRequest.model : void 0;
+    retryButton.textContent = originalRequest ? "\u91CD\u8BD5\u539F\u8BF7\u6C42" : canRetryLoad && !canResendDraft ? "\u5237\u65B0\u5BF9\u8BDD" : "\u91CD\u8BD5";
     retryButton.title = retryModel ? `\u4F7F\u7528\u539F\u8BF7\u6C42\u91CD\u8BD5\uFF08${retryModel.provider} / ${retryModel.model}\uFF09` : "";
-    const error = formError || activeUnsent?.error || activeRegenerate?.error || failures.get(activeId) || (activeId === null ? createError : detailError) || modelError || historyError;
+    const error = formError || activeUnsent?.error || activeReplyAction?.error || failures.get(activeId) || (activeId === null ? createError : detailError) || modelError || historyError;
     const notice = notices.get(activeId) || "";
     status.classList.toggle("error", Boolean(error));
     status.textContent = error || notice || (loading || unloaded ? "\u6B63\u5728\u52A0\u8F7D\u5BF9\u8BDD\u2026" : "") || (remote && !waiting ? "\u56DE\u590D\u4ECD\u5728\u751F\u6210\uFF0C\u5386\u53F2\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002" : "") || (flight?.stopped || flight?.finished ? "\u6B63\u5728\u66F4\u65B0\u5BF9\u8BDD\u2026" : "") || (creating ? "\u6B63\u5728\u521B\u5EFA\u5BF9\u8BDD\u2026" : thinking ? "\u6B63\u5728\u601D\u8003\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : saving ? "\u6B63\u5728\u53D1\u9001\u6D88\u606F\u2026" : waiting ? "\u6B63\u5728\u751F\u6210\uFF0C\u53EF\u4EE5\u968F\u65F6\u505C\u6B62\u3002" : "") || (unanswered && !waiting ? "\u4E0A\u4E00\u6761\u6D88\u606F\u8FD8\u672A\u6536\u5230\u56DE\u590D\uFF0C\u53EF\u4EE5\u91CD\u8BD5\u3002" : "");
@@ -1146,25 +1177,60 @@
     const choice = conversation?.provider ? conversation : defaultModel;
     return models.find((model) => choice && model.provider === choice.provider && model.model === choice.model) || null;
   }
+  function selectedReasoningEffort(model, conversation = currentConversation()) {
+    const effort = conversation?.provider ? conversation.reasoningEffort : defaultReasoningEffort;
+    return effort && model.reasoning_efforts?.includes(effort) ? effort : model.reasoning_efforts?.[0];
+  }
   function syncModelSelect() {
-    closeModelMenu();
     const chosen = selectedModel();
-    const label = chosen ? `${chosen.provider} / ${chosen.model}` : models.length ? "\u6A21\u578B\u4E0D\u53EF\u7528" : modelError ? "\u6A21\u578B\u52A0\u8F7D\u5931\u8D25" : "\u6B63\u5728\u52A0\u8F7D\u6A21\u578B\u2026";
-    $("#model-label").textContent = label;
+    const effort = chosen ? selectedReasoningEffort(chosen) : void 0;
+    const modelLabel = chosen ? `${chosen.provider} / ${chosen.model}` : models.length ? "\u6A21\u578B\u4E0D\u53EF\u7528" : modelError ? "\u6A21\u578B\u52A0\u8F7D\u5931\u8D25" : "\u6B63\u5728\u52A0\u8F7D\u6A21\u578B\u2026";
+    const effortLabel = effort === "max" ? "Max" : "High";
+    const label = effort ? `${modelLabel} \xB7 ${effortLabel}` : modelLabel;
+    $("#model-label").textContent = modelLabel;
+    const modelEffort = $("#model-effort-label");
+    modelEffort.hidden = !effort;
+    modelEffort.textContent = effortLabel;
     modelSelect.title = label;
-    modelSelect.setAttribute("aria-label", `\u9009\u62E9\u6A21\u578B\uFF1A${label}`);
-    for (const option of modelMenu.children) {
-      option.setAttribute("aria-selected", String(chosen !== null && option.getAttribute("data-key") === modelKey(chosen)));
+    modelSelect.setAttribute("aria-label", `\u9009\u62E9\u6A21\u578B\u548C\u601D\u8003\u5F3A\u5EA6\uFF1A${label}`);
+    const key = chosen ? modelKey(chosen) : null;
+    for (const option of modelOptions.querySelectorAll("button")) {
+      option.setAttribute("aria-pressed", String(option.value === key));
     }
+    modelOptions.hidden = Boolean(effort) && !choosingModel;
+    effortOptions.hidden = !effort;
+    modelOptionsToggle.setAttribute("aria-expanded", String(!modelOptions.hidden));
+    modelOptionsToggle.setAttribute("aria-label", `\u5207\u6362\u6A21\u578B\uFF1A${modelLabel}`);
+    modelOptionsToggle.title = modelLabel;
+    $("#effort-model-label").textContent = chosen?.model ?? "";
+    $("#effort-label").textContent = effortLabel;
+    const efforts = chosen?.reasoning_efforts;
+    effortControl.hidden = choosingModel || !efforts?.includes("high") || !efforts.includes("max");
+    effortSlider.value = effort === "max" ? "1" : "0";
+    effortSlider.setAttribute("aria-valuetext", effortLabel);
+    effortSlider.classList.toggle("max", effort === "max");
+    positionModelMenu();
+  }
+  function focusModelOption() {
+    (modelOptions.querySelector('[aria-pressed="true"]') || modelOptions.querySelector("button"))?.focus();
   }
   function closeModelMenu() {
     modelMenu.hidePopover();
     modelSelect.setAttribute("aria-expanded", "false");
   }
   function openModelMenu() {
-    if (modelSelect.disabled) return;
+    if (modelSelect.disabled || modelMenu.matches(":popover-open")) return;
+    choosingModel = false;
+    syncModelSelect();
     modelMenu.showPopover({ source: modelSelect });
     modelSelect.setAttribute("aria-expanded", "true");
+    positionModelMenu();
+    if (effortOptions.hidden) focusModelOption();
+    else if (effortControl.hidden) modelOptionsToggle.focus();
+    else effortSlider.focus();
+  }
+  function positionModelMenu() {
+    if (!modelMenu.matches(":popover-open")) return;
     const trigger = modelSelect.getBoundingClientRect();
     const gap = 8;
     const above = trigger.top - gap - 12;
@@ -1174,44 +1240,55 @@
     const menu = modelMenu.getBoundingClientRect();
     modelMenu.style.left = `${Math.max(12, Math.min(trigger.right - menu.width, window.innerWidth - menu.width - 12))}px`;
     modelMenu.style.top = `${openAbove ? trigger.top - gap - menu.height : trigger.bottom + gap}px`;
-    (modelMenu.querySelector('[aria-selected="true"]') || modelMenu.querySelector(":scope > :first-child"))?.focus();
   }
   function renderModelOptions() {
-    modelMenu.replaceChildren();
+    modelOptions.querySelectorAll("button").forEach((button) => button.remove());
     for (const model of models) {
       const option = document.createElement("button");
       option.type = "button";
+      option.value = modelKey(model);
       option.className = "model-option";
-      option.setAttribute("role", "option");
-      option.setAttribute("aria-label", `${model.provider} / ${model.model}`);
       option.title = `${model.provider} / ${model.model}`;
-      option.tabIndex = -1;
-      option.dataset.key = modelKey(model);
       const name = document.createElement("span");
       name.className = "model-option-name";
-      name.textContent = model.model;
+      name.textContent = option.title;
       option.append(name, icon("check"));
       option.addEventListener("click", () => {
         const conversation = currentConversation();
-        if (conversation) {
-          conversation.provider = model.provider;
-          conversation.model = model.model;
-        } else defaultModel = model;
+        if (option.getAttribute("aria-pressed") !== "true") {
+          if (conversation) {
+            conversation.provider = model.provider;
+            conversation.model = model.model;
+            conversation.reasoningEffort = void 0;
+          } else {
+            defaultModel = model;
+            defaultReasoningEffort = void 0;
+          }
+        }
+        choosingModel = false;
         syncModelSelect();
         updateComposer();
-        modelSelect.focus();
+        if (effortOptions.hidden) {
+          closeModelMenu();
+          modelSelect.focus();
+        } else modelOptionsToggle.focus();
       });
-      modelMenu.append(option);
+      modelOptions.append(option);
     }
   }
   async function loadModels() {
     modelError = "";
     try {
       const data = await api("/api/models");
-      if (!Array.isArray(data.models) || !data.models.length || !data.models.every((item) => typeof item.provider === "string" && typeof item.model === "string")) throw new Error("\u6CA1\u6709\u53EF\u7528\u6A21\u578B\uFF0C\u8BF7\u68C0\u67E5\u540E\u7AEF\u914D\u7F6E\u3002");
+      if (!Array.isArray(data.models) || !data.models.length || !data.models.every((item) => typeof item.provider === "string" && typeof item.model === "string" && (item.reasoning_efforts === void 0 || Array.isArray(item.reasoning_efforts) && item.reasoning_efforts.every((effort) => effort === "high" || effort === "max")))) {
+        throw new Error("\u6CA1\u6709\u53EF\u7528\u6A21\u578B\uFF0C\u8BF7\u68C0\u67E5\u540E\u7AEF\u914D\u7F6E\u3002");
+      }
       models = data.models;
       const defaultKey = defaultModel ? modelKey(defaultModel) : null;
-      if (!models.some((model) => modelKey(model) === defaultKey)) defaultModel = models[0] ?? null;
+      if (!models.some((model) => modelKey(model) === defaultKey)) {
+        defaultModel = models[0] ?? null;
+        defaultReasoningEffort = void 0;
+      }
       renderModelOptions();
     } catch (error) {
       if (!currentUser || errorCode(error) === "session_changed") return;
@@ -1234,23 +1311,51 @@
   modelMenu.addEventListener("toggle", (event) => {
     modelSelect.setAttribute("aria-expanded", String(event.newState === "open"));
   });
+  modelOptionsToggle.addEventListener("click", () => {
+    choosingModel = !choosingModel;
+    syncModelSelect();
+    if (choosingModel) focusModelOption();
+  });
+  effortSlider.addEventListener("input", () => {
+    const effort = effortSlider.valueAsNumber === 1 ? "max" : "high";
+    const conversation = currentConversation();
+    const model = selectedModel(conversation);
+    if (!model?.reasoning_efforts?.includes(effort)) return;
+    if (conversation) {
+      conversation.provider = model.provider;
+      conversation.model = model.model;
+      conversation.reasoningEffort = effort;
+    } else defaultReasoningEffort = effort;
+    syncModelSelect();
+  });
   modelMenu.addEventListener("keydown", (event) => {
-    const options = [...modelMenu.querySelectorAll(":scope > button")];
-    const index = options.findIndex((option) => option === document.activeElement);
-    let next;
-    if (event.key === "ArrowDown") next = (index + 1) % options.length;
-    else if (event.key === "ArrowUp") next = (index - 1 + options.length) % options.length;
-    else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = options.length - 1;
-    else if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Escape") {
+      event.preventDefault();
       closeModelMenu();
       modelSelect.focus();
-    }
-    if (next !== void 0) {
+    } else if (event.key === "Enter" && event.target === effortSlider) {
       event.preventDefault();
-      options[next]?.focus();
     }
   });
+  modelOptions.addEventListener("keydown", (event) => {
+    const options = [...modelOptions.querySelectorAll("button")];
+    const index = options.findIndex((option) => option === event.target);
+    if (index === -1) return;
+    let next = index;
+    if (event.key === "ArrowUp") next = (index + options.length - 1) % options.length;
+    else if (event.key === "ArrowDown") next = (index + 1) % options.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = options.length - 1;
+    else return;
+    event.preventDefault();
+    options[next]?.focus();
+  });
+  modelMenu.addEventListener("focusout", (event) => {
+    if (event.relatedTarget instanceof Node && event.relatedTarget !== modelSelect && !modelMenu.contains(event.relatedTarget)) {
+      closeModelMenu();
+    }
+  });
+  window.addEventListener("resize", positionModelMenu);
   $("#reload-models").addEventListener("click", loadModels);
   stopButton.addEventListener("click", () => {
     const flight = pending.get(activeId);
@@ -1349,7 +1454,25 @@
       updateComposer();
       return;
     }
-    return requestReply(conversation, { questionId, previousAssistantId: previousAnswer?.id, model, requestId: makeId(), error: "" });
+    return requestReply(conversation, {
+      questionId,
+      previousAssistantId: previousAnswer?.id,
+      model,
+      reasoningEffort: selectedReasoningEffort(model, conversation),
+      requestId: makeId(),
+      error: ""
+    });
+  }
+  function continueReply(conversation, message) {
+    if (!message.id || !message.continue_from || conversation.messages.at(-1) !== message) return;
+    const previous = matchingPendingReplyAction(conversation);
+    if (previous && "answerId" in previous) return requestReply(conversation, previous, true);
+    return requestReply(conversation, {
+      answerId: message.id,
+      revision: message.continue_from,
+      requestId: makeId(),
+      error: ""
+    });
   }
   function reconcileUnconfirmedReply(conversation, request, error, refreshed, retry) {
     const { id } = conversation;
@@ -1376,7 +1499,12 @@
         request.rejected = true;
       }
     } else {
-      pendingRegenerates.delete(id);
+      pendingReplyActions.delete(id);
+      if ("answerId" in request) {
+        if (!refreshed) failures.set(id, request.error);
+        else if (answer?.continue_from === request.revision) formError = request.error;
+        return;
+      }
       const completedDuringRetry = existingRequest && answer?.role === "assistant" && answer.state === "completed" && answer.id !== request.previousAssistantId;
       if (!completedDuringRetry && latestQuestionId(conversation) === request.questionId) {
         failures.set(id, existingRequest ? "\u751F\u6210\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u3002" : request.error);
@@ -1388,22 +1516,24 @@
     if (conversationBusy(conversation)) return;
     request.error = "";
     if ("content" in request) pendingSends.set(id, request);
-    else pendingRegenerates.set(id, request);
-    const { provider, model } = request.model;
-    const requestBody = {
-      provider,
-      model,
-      stream: true,
-      conversation_id: id,
-      request_id: request.requestId,
+    else pendingReplyActions.set(id, request);
+    const base = { stream: true, conversation_id: id, request_id: request.requestId };
+    const continuing = "answerId" in request;
+    const prefix = continuing ? conversation.messages.at(-1) : void 0;
+    const requestBody = continuing ? { ...base, continue_message_id: request.answerId, continue_from: request.revision } : {
+      ...base,
+      provider: request.model.provider,
+      model: request.model.model,
+      reasoning_effort: request.reasoningEffort,
       ..."content" in request ? { content: request.content } : { regenerate_message_id: request.questionId }
     };
     const epoch = authEpoch;
     const flight = {
       controller: new AbortController(),
-      text: "",
-      reasoning: "",
+      text: prefix?.content || "",
+      reasoning: prefix?.reasoning || "",
       regenerate: "questionId" in request,
+      continueId: continuing ? request.answerId : void 0,
       stopped: false,
       finished: false
     };
@@ -1412,9 +1542,10 @@
     notices.delete(id);
     conversationErrors.delete(id);
     if (activeId === id) formError = "";
-    if (!retry) {
-      conversation.provider = provider;
-      conversation.model = model;
+    if (!retry && !continuing) {
+      conversation.provider = request.model.provider;
+      conversation.model = request.model.model;
+      conversation.reasoningEffort = request.reasoningEffort;
     }
     if (activeId === id) {
       render();
@@ -1443,13 +1574,18 @@
         if (event === "meta") {
           if (typeof data.user_message_id !== "string" || typeof data.assistant_message_id !== "string") throw new Error("\u56DE\u590D\u6D88\u606F ID \u5F02\u5E38\u3002");
           flight.assistantId = data.assistant_message_id;
+          if (continuing && flight.assistantId !== request.answerId) throw new Error("\u56DE\u590D\u6D88\u606F ID \u5F02\u5E38\u3002");
           if ("content" in request) {
             clearConfirmedSend(id, request);
             if (!retry && !conversation.messages.some((message) => message.id === data.user_message_id)) {
               conversation.messages.push({ id: data.user_message_id, role: "user", state: "completed", content: request.content });
             }
-          } else if (pendingRegenerates.get(id) === request) {
-            pendingRegenerates.delete(id);
+          } else if (pendingReplyActions.get(id) === request) {
+            pendingReplyActions.delete(id);
+          }
+          if (continuing && data.snapshot === true) {
+            flight.finished = true;
+            return true;
           }
           if (activeId === id) renderReplyProgress();
         }
@@ -1474,9 +1610,24 @@
           if (!flight.assistantId || data.assistant_message_id !== flight.assistantId) throw new Error("\u56DE\u590D\u6D88\u606F ID \u5F02\u5E38\u3002");
           if (!flight.text.trim() && data.finish_reason !== "refusal") throw new Error("\u6CA1\u6709\u6536\u5230\u6709\u6548\u56DE\u590D\uFF0C\u8BF7\u91CD\u8BD5\u3002");
           flight.finished = true;
-          if (!retry) {
-            const reply = { id: flight.assistantId, state: "completed", role: "assistant", content: flight.text || "\u6A21\u578B\u62D2\u7EDD\u56DE\u7B54\u6B64\u95EE\u9898\u3002", reasoning: flight.reasoning, truncated: data.truncated === true };
-            if (flight.regenerate && conversation.messages.at(-1)?.role === "assistant") conversation.messages[conversation.messages.length - 1] = reply;
+          if (!retry || continuing) {
+            const reply = {
+              ...prefix,
+              id: flight.assistantId,
+              state: "completed",
+              role: "assistant",
+              content: flight.text || "\u6A21\u578B\u62D2\u7EDD\u56DE\u7B54\u6B64\u95EE\u9898\u3002",
+              reasoning: flight.reasoning,
+              finish_reason: data.finish_reason,
+              truncated: data.truncated === true,
+              error: "",
+              interrupted: false,
+              continue_from: void 0
+            };
+            const last = conversation.messages.at(-1);
+            if (continuing) {
+              if (last?.id === flight.continueId) conversation.messages[conversation.messages.length - 1] = reply;
+            } else if (flight.regenerate && last?.role === "assistant") conversation.messages[conversation.messages.length - 1] = reply;
             else conversation.messages.push(reply);
           }
           if (activeId === id) updateComposer();
@@ -1498,7 +1649,19 @@
       } catch (error) {
         if (epoch !== authEpoch || !currentUser || !conversations.includes(conversation)) return;
         recordConversationError(id, error);
-        if (!retry && !flight.regenerate && !flight.finished && flight.assistantId && (flight.text || flight.reasoning)) {
+        const last = conversation.messages.at(-1);
+        if (continuing && !flight.finished && flight.assistantId && last?.id === flight.continueId) {
+          conversation.messages[conversation.messages.length - 1] = {
+            ...last,
+            role: "assistant",
+            content: flight.text,
+            reasoning: flight.reasoning,
+            state: "interrupted",
+            interrupted: true,
+            error: savedFlightError,
+            continue_from: void 0
+          };
+        } else if (!continuing && !retry && !flight.regenerate && !flight.finished && flight.assistantId && (flight.text || flight.reasoning)) {
           conversation.messages.push({ role: "assistant", content: flight.text, reasoning: flight.reasoning, interrupted: true });
         }
       }
@@ -1531,6 +1694,7 @@
     const model = selectedModel(conversation);
     if (!text || prompt.disabled || !model || existing && !existing.rejected || conversation && conversationBusy(conversation) || !conversation && (activeId !== null || creatingConversation)) return;
     if (!validateChatContext([...conversation?.messages || [], { content: text }])) return;
+    const reasoningEffort = selectedReasoningEffort(model, conversation);
     const epoch = authEpoch;
     if (!conversation) {
       const creation = { draftVersion: newDraftVersion };
@@ -1566,6 +1730,7 @@
       content: text,
       raw,
       model,
+      reasoningEffort,
       requestId: makeId(),
       error: "",
       parentId: conversation.messages.at(-1)?.id ?? conversation.current_message_id
@@ -1608,9 +1773,9 @@
         void requestReply(conversation, unsent, true);
         return;
       }
-      const regenerate = matchingPendingRegenerate(conversation);
-      if (regenerate) {
-        void requestReply(conversation, regenerate, true);
+      const action = matchingPendingReplyAction(conversation);
+      if (action) {
+        void requestReply(conversation, action, true);
         return;
       }
     }

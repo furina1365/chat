@@ -1,6 +1,7 @@
 #include "ChatRoutes.hpp"
 #include "HttpSupport.hpp"
 #include "ai/ModelManager.hpp"
+#include "common/AssistantText.hpp"
 #include "history/History.hpp"
 #include "http/HttpRouter.hpp"
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -23,6 +25,7 @@ public:
     history::UserId user = 0;
     history::ConversationId conversation = 0;
     history::MessageId message = 0;
+    std::string generation_id;
     std::shared_ptr<const std::atomic<bool>> client_cancel;
     std::shared_ptr<std::atomic<bool>> model_cancel = std::make_shared<std::atomic<bool>>(false);
     std::chrono::steady_clock::time_point next_renew{};
@@ -72,13 +75,14 @@ public:
 
   static std::shared_ptr<Handle> Track(const std::shared_ptr<LeaseRenewer> &self,
                                        history::UserId user, history::ConversationId conversation,
-                                       history::MessageId message,
+                                       const history::Message &message,
                                        std::shared_ptr<const std::atomic<bool>> client_cancel)
   {
     auto entry = std::make_shared<Entry>();
     entry->user = user;
     entry->conversation = conversation;
-    entry->message = message;
+    entry->message = message.id;
+    entry->generation_id = message.generation_id;
     entry->client_cancel = std::move(client_cancel);
     entry->next_renew = std::chrono::steady_clock::now() + self->renew_interval_;
     {
@@ -157,7 +161,7 @@ private:
       auto message = due->message;
       lock.unlock();
 
-      auto status = history_.RenewLease(user, conversation, message);
+      auto status = history_.RenewLease(user, conversation, message, due->generation_id);
 
       lock.lock();
       due->renewing = false;
@@ -215,12 +219,20 @@ const char *FinishName(ai::FinishReason reason)
 using detail::Json;
 Json Meta(history::ConversationId conversation, const history::Turn &turn)
 { return {{"conversation_id", std::to_string(conversation)}, {"user_message_id", std::to_string(turn.user_message.id)}, {"assistant_message_id", std::to_string(turn.assistant_message.id)}}; }
+history::Status FinishUnstarted(history::History &history, history::UserId user,
+                               history::ConversationId conversation, const history::Message &message,
+                               history::MessageState state, const std::string &error)
+{
+  return history.Finish(user, conversation, message.id, message.generation_id,
+                        {1, state, message.content, message.reasoning, "", error});
+}
+
 bool FinishIfCancelled(history::History &history, history::UserId user, history::ConversationId conversation,
-                       history::MessageId message, const HttpResponse &response)
+                       const history::Message &message, const HttpResponse &response)
 {
   if (!response.cancelToken()->load())
     return false;
-  const auto saved = history.Finish(user, conversation, message, {1, history::MessageState::Interrupted, "", "", "", ""});
+  const auto saved = FinishUnstarted(history, user, conversation, message, history::MessageState::Interrupted, "");
   if (std::holds_alternative<history::Error>(saved))
     std::cerr << "Failed to save an interrupted turn\n";
   return true;
@@ -242,20 +254,25 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   if (response->cancelToken()->load())
   {
     lease->Stop();
-    FinishIfCancelled(history, user, conversation, turn.assistant_message.id, *response);
+    FinishIfCancelled(history, user, conversation, turn.assistant_message, *response);
     return;
   }
   auto model_cancel = lease->modelCancel();
   response->SetCancelHandler([model_cancel] { model_cancel->store(true); });
   history::Completion completion;
+  const auto &assistant = turn.assistant_message;
   completion.state = history::MessageState::Failed;
+  completion.content = assistant.content;
+  completion.reasoning = assistant.reasoning;
   bool save_failed = false;
   const char *error_status = "502 Bad Gateway";
+  const char *error_code = "generation_failed";
   auto last_save = std::chrono::steady_clock::now();
   std::size_t saved_size = 0;
   try
   {
-    auto started = history.SaveProgress(user, conversation, turn.assistant_message.id, {++completion.sequence, "", ""});
+    auto started = history.SaveProgress(user, conversation, assistant.id, assistant.generation_id,
+                                        {++completion.sequence, completion.content, completion.reasoning});
     if (auto *error = std::get_if<history::Error>(&started))
     {
       lease->Stop();
@@ -269,10 +286,9 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       if (response->cancelToken()->load() || model_cancel->load()) return false;
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
-      if (size > 4 * 1024 * 1024) return false;
-      if (now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
+      if (!saved_size || now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
       {
-        auto saved = history.SaveProgress(user, conversation, turn.assistant_message.id,
+        auto saved = history.SaveProgress(user, conversation, assistant.id, assistant.generation_id,
             {++completion.sequence, completion.content, completion.reasoning});
         if (std::holds_alternative<history::Error>(saved)) { save_failed = true; return false; }
         lease->Touch();
@@ -287,16 +303,37 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     else result = client->Generate(request, model_cancel);
     if (auto *reply = std::get_if<ai::ChatResponse>(&result))
     {
-      completion.content = reply->reply;
-      completion.reasoning = reply->reasoning;
+      if (!stream)
+      {
+        completion.content += reply->reply;
+        completion.reasoning += reply->reasoning;
+      }
       completion.finish_reason = FinishName(reply->finish_reason);
       completion.state = (response->cancelToken()->load() || model_cancel->load()) ? history::MessageState::Interrupted : history::MessageState::Completed;
-      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal) completion.content = "模型拒绝回答此问题。";
+      constexpr std::string_view refusal = "模型拒绝回答此问题。";
+      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal &&
+          completion.reasoning.size() <= kMaxAssistantTextBytes - refusal.size())
+        completion.content = refusal;
+      if (completion.state == history::MessageState::Completed && completion.content.empty() && reply->finish_reason == ai::FinishReason::Length)
+      {
+        completion.state = history::MessageState::Failed;
+        completion.error = "模型达到生成长度上限，未生成正文。";
+      }
     }
     else
     {
-      auto &error = std::get<ai::Error>(result);
-      if (error.code == ai::ErrorCode::Timeout) error_status = "504 Gateway Timeout";
+      const auto &error = std::get<ai::Error>(result);
+      if (error.finish_reason) completion.finish_reason = FinishName(*error.finish_reason);
+      switch (error.code)
+      {
+      case ai::ErrorCode::Timeout:
+        error_status = "504 Gateway Timeout";
+        error_code = "upstream_timeout";
+        break;
+      case ai::ErrorCode::ConnectTimeout: error_code = "upstream_connect_timeout"; break;
+      case ai::ErrorCode::StreamIdleTimeout: error_code = "upstream_idle_timeout"; break;
+      default: break;
+      }
       if (save_failed) error_status = "503 Service Unavailable";
       completion.error = save_failed ? "保存回复失败，请刷新历史确认。" : error.message;
       completion.state = error.code == ai::ErrorCode::Cancelled ? history::MessageState::Interrupted : history::MessageState::Failed;
@@ -316,7 +353,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     return;
   }
   ++completion.sequence;
-  auto saved = history.Finish(user, conversation, turn.assistant_message.id, completion);
+  auto saved = history.Finish(user, conversation, assistant.id, assistant.generation_id, completion);
   if (auto *error = std::get_if<history::Error>(&saved))
   {
     SendHistoryError(response, stream, *error);
@@ -326,7 +363,7 @@ void Generate(history::History &history, history::UserId user, history::Conversa
   if (completion.state != history::MessageState::Completed)
   {
     auto message = completion.error.empty() ? "生成已中断，可重新生成。" : completion.error;
-    if (stream) response->SendEvent("error", Json{{"code", "generation_failed"}, {"error", message}}.dump(), true);
+    if (stream) response->SendEvent("error", Json{{"code", error_code}, {"error", message}}.dump(), true);
     else detail::ReplyError(response, error_status, "generation_failed", message);
     return;
   }
@@ -341,6 +378,24 @@ void Generate(history::History &history, history::UserId user, history::Conversa
     response->Reply("200 OK", body.dump());
   }
 }
+
+const ai::ModelClient *PrefixClient(const ai::ModelManager &models, const history::GenerationModel &model)
+{
+  const auto *client = models.Find(model.provider, model.model);
+  return client && client->SupportsPrefixCompletion() ? client : nullptr;
+}
+
+Json ConversationView(const history::ConversationView &view, const ai::ModelManager &models)
+{
+  auto result = detail::ConversationView(view);
+  if (!view.conversation.active_message_id && !view.messages.empty())
+  {
+    const auto &message = view.messages.back();
+    if (message.CanContinue() && PrefixClient(models, message.generation_model))
+      result["messages"].back()["continue_from"] = message.generation_id;
+  }
+  return result;
+}
 }
 void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &history,
                         const ai::ModelManager &models, SubmitTask business_tasks, SubmitModelTask model_tasks,
@@ -351,7 +406,12 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
   };
   route("GET", "/api/models", [&models](const auto &, const auto &, const auto &response) {
     Json items = Json::array();
-    for (const auto &model : models.List()) items.push_back({{"provider", model.provider}, {"model", model.model}});
+    for (const auto &model : models.List())
+    {
+      Json item{{"provider", model.provider}, {"model", model.model}};
+      if (model.supports_reasoning_effort) item["reasoning_efforts"] = {"high", "max"};
+      items.push_back(std::move(item));
+    }
     response->Reply("200 OK", Json{{"models", items}}.dump());
   });
   route("POST", "/api/conversations", [&history](const auto &context, const auto &request, const auto &response) {
@@ -371,15 +431,15 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
     if (page.next) next = {{"before_updated_at", std::to_string(detail::Millis(page.next->updated_at))}, {"before_id", std::to_string(page.next->id)}};
     response->Reply("200 OK", Json{{"items", items}, {"next", next}}.dump());
   });
-  route("GET", "/api/conversation", [&history](const auto &context, const auto &request, const auto &response) {
+  route("GET", "/api/conversation", [&history, &models](const auto &context, const auto &request, const auto &response) {
     auto query = detail::Query(request, {"id"});
     auto view = detail::HistoryTake(history.GetView(context.user_id, detail::Id(query, "id")));
-    response->Reply("200 OK", detail::ConversationView(view).dump());
+    response->Reply("200 OK", ConversationView(view, models).dump());
   });
-  route("POST", "/api/conversation/select", [&history](const auto &context, const auto &request, const auto &response) {
+  route("POST", "/api/conversation/select", [&history, &models](const auto &context, const auto &request, const auto &response) {
     auto body = detail::Body(request, {"conversation_id", "message_id"});
     auto view = detail::HistoryTake(history.SelectReply(context.user_id, detail::Id(body, "conversation_id"), detail::Id(body, "message_id")));
-    response->Reply("200 OK", detail::ConversationView(view).dump());
+    response->Reply("200 OK", ConversationView(view, models).dump());
   });
   route("POST", "/api/conversation/rename", [&history](const auto &context, const auto &request, const auto &response) {
     auto body = detail::Body(request, {"conversation_id", "title"});
@@ -408,27 +468,59 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
   });
   auto leases = std::make_shared<LeaseRenewer>(history);
   route("POST", "/api/chat", [&history, &models, model_tasks, leases](const auto &context, const auto &http_request, const auto &response) {
-    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream", "content", "regenerate_message_id"});
-    if (body.contains("content") == body.contains("regenerate_message_id")) throw std::invalid_argument("content");
-    auto client = models.Find(detail::String(body, "provider"), detail::String(body, "model"));
-    if (!client) throw std::invalid_argument("model");
+    auto body = detail::Body(http_request, {"conversation_id", "request_id", "provider", "model", "stream",
+                                           "content", "regenerate_message_id", "reasoning_effort",
+                                           "continue_message_id", "continue_from"});
+    const int actions = body.contains("content") + body.contains("regenerate_message_id") + body.contains("continue_message_id");
+    const bool continuing = body.contains("continue_message_id");
+    if (actions != 1 || continuing != body.contains("continue_from"))
+      throw std::invalid_argument("chat action");
     auto stream = body.value("stream", true);
     auto conversation = detail::Id(body, "conversation_id");
     auto request_id = detail::String(body, "request_id");
-    auto turn = detail::HistoryTake(body.contains("content")
-        ? history.BeginTurn(context.user_id, conversation, request_id, detail::String(body, "content"))
-        : history.Regenerate(context.user_id, conversation, detail::Id(body, "regenerate_message_id"), request_id));
+    const ai::ModelClient *client = nullptr;
+    ai::ChatRequest request;
+    auto turn = [&] {
+      if (continuing)
+      {
+        if (body.contains("provider") || body.contains("model") || body.contains("reasoning_effort"))
+          throw std::invalid_argument("continuation model");
+        return detail::HistoryTake(history.Continue(
+            context.user_id, conversation, detail::Id(body, "continue_message_id"),
+            detail::String(body, "continue_from"), request_id,
+            [&](const history::GenerationModel &model) {
+              client = PrefixClient(models, model);
+              return client != nullptr;
+            }));
+      }
+      history::GenerationModel model{detail::String(body, "provider"), detail::String(body, "model"), ""};
+      client = models.Find(model.provider, model.model);
+      if (!client) throw std::invalid_argument("model");
+      if (body.contains("reasoning_effort"))
+      {
+        model.reasoning_effort = detail::String(body, "reasoning_effort");
+        if (!client->SupportsReasoningEffort() || (model.reasoning_effort != "high" && model.reasoning_effort != "max"))
+          throw std::invalid_argument("reasoning_effort");
+      }
+      else if (client->SupportsReasoningEffort())
+        model.reasoning_effort = "high";
+      return detail::HistoryTake(body.contains("content")
+          ? history.BeginTurn(context.user_id, conversation, request_id, detail::String(body, "content"), model)
+          : history.Regenerate(context.user_id, conversation, detail::Id(body, "regenerate_message_id"), request_id, model));
+    }();
     if (!turn.created)
     {
       if (turn.assistant_message.state != history::MessageState::Completed)
       { detail::ReplyError(response, "409 Conflict", "conflict", "该请求已处理或正在生成，请刷新历史后重试。"); return; }
-      auto reply = Meta(conversation, turn);
+      auto meta = Meta(conversation, turn);
+      if (continuing) meta["snapshot"] = true;
+      auto reply = meta;
       reply["finish_reason"] = turn.assistant_message.finish_reason;
       reply["truncated"] = turn.assistant_message.finish_reason == "length";
       if (stream)
       {
         response->StartStream();
-        response->SendEvent("meta", Meta(conversation, turn).dump());
+        response->SendEvent("meta", meta.dump());
         auto replay = [&](const char *event, const std::string &text) {
           for (std::size_t start = 0; start < text.size();)
           {
@@ -454,12 +546,16 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
       }
       return;
     }
-    ai::ChatRequest request;
     std::shared_ptr<LeaseRenewer::Handle> lease;
     try
     {
-      if (FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
+      if (FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message, *response))
         return;
+      const auto &assistant = turn.assistant_message;
+      if (continuing) request.prefix = ai::AssistantPrefix{assistant.content, assistant.reasoning};
+      const auto &effort = assistant.generation_model.reasoning_effort;
+      if (!effort.empty())
+        request.reasoning_effort = effort == "max" ? ai::ReasoningEffort::Max : ai::ReasoningEffort::High;
       auto messages = detail::HistoryTake(history.Context(context.user_id, conversation, turn.user_message.id));
       std::size_t bytes = 0;
       for (const auto &message : messages)
@@ -470,7 +566,7 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
         if (bytes > 240 * 1024) throw history::Error{history::ErrorCode::InvalidRequest, "对话过长，请新建对话。"};
         request.messages.push_back({message.role == history::Role::User ? ai::Role::User : ai::Role::Assistant, message.content});
       }
-      lease = LeaseRenewer::Track(leases, context.user_id, conversation, turn.assistant_message.id, response->cancelToken());
+      lease = LeaseRenewer::Track(leases, context.user_id, conversation, assistant, response->cancelToken());
       std::function<void()> start_stream;
       if (stream)
         start_stream = [response] { response->StartStream(); };
@@ -483,8 +579,9 @@ void RegisterChatRoutes(HttpRouter &router, auth::Auth &auth, history::History &
     catch (...)
     {
       if (lease) lease->Stop();
-      if (!FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message.id, *response))
-        history.Finish(context.user_id, conversation, turn.assistant_message.id, {1, history::MessageState::Failed, "", "", "", "请求未开始生成，请重试。"});
+      if (!FinishIfCancelled(history, context.user_id, conversation, turn.assistant_message, *response))
+        FinishUnstarted(history, context.user_id, conversation, turn.assistant_message,
+                        history::MessageState::Failed, "请求未开始生成，请重试。");
       throw;
     }
   });

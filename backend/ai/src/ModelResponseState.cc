@@ -37,12 +37,13 @@ namespace ai
 
   bool ModelResponseState::Append(const std::string &text, bool reasoning)
   {
-    if (text.size() > max_response_bytes - response.reply.size() - response.reasoning.size())
+    if (text.size() > remaining_text_bytes)
     {
-      failure = Failure(ErrorCode::ResourceLimit, "模型回复超过大小限制。");
+      failure = Failure(ErrorCode::ResourceLimit, "模型回复正文与思考合计超过大小限制。");
       return false;
     }
     (reasoning ? response.reasoning : response.reply) += text;
+    remaining_text_bytes -= text.size();
     const auto *callback = reasoning ? reasoning_sink : sink;
     if (!text.empty() && callback && !(*callback)(text))
     {

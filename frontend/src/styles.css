@@ -636,7 +636,8 @@ h1 {
   height: 15px;
 }
 
-.regenerate-button {
+.regenerate-button,
+.continue-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -650,12 +651,23 @@ h1 {
 }
 
 .regenerate-button:hover:not(:disabled),
+.continue-button:hover:not(:disabled),
 .message-actions .icon-button:hover:not(:disabled) {
   background: var(--icon-surface);
   color: var(--icon-hover);
 }
 
-.regenerate-button:disabled {
+.regenerate-button.regenerate-empty,
+.continue-button {
+  width: auto;
+  min-height: 32px;
+  gap: 6px;
+  padding-inline: 9px;
+  background: var(--icon-surface);
+}
+
+.regenerate-button:disabled,
+.continue-button:disabled {
   opacity: .45;
 }
 
@@ -1008,6 +1020,15 @@ textarea::placeholder {
   text-overflow: ellipsis;
 }
 
+#model-effort-label {
+  flex-shrink: 0;
+}
+
+#model-effort-label::before {
+  content: '·';
+  margin-right: 7px;
+}
+
 #model-select:hover:not(:disabled),
 #model-select[aria-expanded="true"] {
   background: var(--icon-surface);
@@ -1025,9 +1046,7 @@ textarea::placeholder {
 .model-menu {
   position: fixed;
   inset: auto;
-  width: max-content;
-  min-width: 200px;
-  max-width: min(320px, calc(100vw - 24px));
+  width: min(288px, calc(100vw - 24px));
   max-height: 360px;
   margin: 0;
   padding: 4px;
@@ -1038,6 +1057,19 @@ textarea::placeholder {
   background: #fff;
   color: #302f2c;
   box-shadow: 0 12px 36px #302f2c18, 0 2px 6px #302f2c0d;
+}
+
+.model-menu-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.model-menu-group legend {
+  padding: 4px 12px;
+  color: var(--icon);
+  font-size: 12px;
 }
 
 .model-option {
@@ -1054,10 +1086,12 @@ textarea::placeholder {
   text-align: left;
 }
 
-.model-option:hover,
-.model-option:focus-visible {
+.model-option:hover {
   background: #f4f4f2;
-  outline: none;
+}
+
+.model-option:focus-visible {
+  outline-offset: -2px;
 }
 
 .model-option-name {
@@ -1076,8 +1110,122 @@ textarea::placeholder {
   color: #3478d4;
 }
 
-.model-option[aria-selected="true"] svg {
+.model-option[aria-pressed="true"] svg {
   visibility: visible;
+}
+
+.effort-options {
+  padding: 9px 11px 6px;
+  text-align: center;
+}
+
+.effort-label {
+  margin: 0;
+  color: var(--accent);
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.model-options-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--icon);
+  font-size: 13px;
+}
+
+.model-options-toggle:hover,
+.model-options-toggle[aria-expanded="true"] {
+  background: var(--icon-surface);
+  color: var(--icon-hover);
+}
+
+.model-options-toggle span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.model-options-toggle svg {
+  width: 13px;
+  height: 13px;
+  transform: rotate(-90deg);
+}
+
+.model-options-toggle[aria-expanded="true"] svg {
+  transform: none;
+}
+
+.effort-control {
+  margin: 5px 2px 3px;
+}
+
+.effort-slider {
+  --effort-track: var(--line);
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.effort-slider.max {
+  --effort-track: var(--accent);
+}
+
+.effort-slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 6px;
+  background: var(--effort-track);
+}
+
+.effort-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -7px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #fff;
+}
+
+.effort-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 6px;
+  background: var(--effort-track);
+}
+
+.effort-slider::-moz-range-thumb {
+  box-sizing: border-box;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #fff;
+}
+
+.effort-scale {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--icon);
+  font-size: 12px;
+}
+
+.effort-slider:not(.max) + .effort-scale :first-child,
+.effort-slider.max + .effort-scale :last-child {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .streaming > .message-content> :last-child::after {

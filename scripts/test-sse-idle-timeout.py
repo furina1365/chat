@@ -22,11 +22,18 @@ ROOT = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 IDLE_SECONDS = 60
 MODEL_TIMEOUT_SECONDS = 3
+UPSTREAM_IDLE_SECONDS = 1.6
+CONNECT_TIMEOUT_SECONDS = 1.0
+LEASE_SECONDS = 3
 LONG_SECONDS = IDLE_SECONDS + 4
-TIMEOUT_MESSAGE = "模型请求超时"
+TOTAL_TIMEOUT_MESSAGE = "已达到单次调用总时限"
+IDLE_TIMEOUT_MESSAGE = "流式响应空闲超时"
 DB_PASSWORD = "sse-regression-only"
 PRESSURE_CASES = ("backpressure", "slow-reader")
-CASES = ("body", "heartbeat", "silent", "partial", *PRESSURE_CASES, "model-timeout")
+CASES = (
+    "body", "heartbeat", "silent", "partial", *PRESSURE_CASES, "model-timeout",
+    "upstream-first-byte", "upstream-idle-after-output", "upstream-heartbeat-lease", "model-connect-timeout",
+)
 
 
 def require(condition, message):
@@ -111,11 +118,21 @@ class ModelHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def handle(self):
+        # Accept the TLS ClientHello on the same socket but leave its handshake stalled.
+        if self.connection.recv(1, socket.MSG_PEEK) == b"\x16":
+            self.server.stop_model.wait()
+            return
+        super().handle()
+
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         case = request["messages"][-1]["content"]
         if self.path != "/v1/chat/completions" or not request["stream"]:
             self.send_error(400)
+            return
+        if case == "upstream-first-byte":
+            self.server.stop_model.wait()
             return
         try:
             self.send_response(200)
@@ -133,6 +150,14 @@ class ModelHandler(BaseHTTPRequestHandler):
         def delta(text):
             send(json.dumps({"choices": [{"delta": {"content": text}}]}))
 
+        def heartbeat():
+            self.wfile.write(b": upstream keep-alive\n\n")
+            self.wfile.flush()
+
+        def partial():
+            delta("partial reply")
+            send('{"choices":[{"delta":{"reasoning_content":"partial reasoning"}}]}')
+
         stop = self.server.stop_model
         if case == "body":
             for tick in range(17):
@@ -144,9 +169,24 @@ class ModelHandler(BaseHTTPRequestHandler):
                 return
             delta("delayed reply")
         elif case == "model-timeout":
-            delta("partial reply")
+            partial()
+            send('{"choices":[{"delta":{},"finish_reason":"length"}]}')
+            while not stop.wait(0.35):
+                heartbeat()
+            return
+        elif case == "upstream-idle-after-output":
+            heartbeat()
+            if stop.wait(0.75):
+                return
+            partial()
             stop.wait()
             return
+        elif case == "upstream-heartbeat-lease":
+            for _ in range(14):
+                heartbeat()
+                if stop.wait(0.35):
+                    return
+            delta("delayed reply")
         elif case in PRESSURE_CASES:
             self.server.pressure[case].send(delta)
             return
@@ -205,14 +245,14 @@ class Chat:
         self.cookie = cookie.split(";", 1)[0]
 
     @contextmanager
-    def stream(self, case, receive_buffer=None):
+    def stream(self, case, receive_buffer=None, *, model="long-timeout"):
         data, _ = self.api("/api/conversations", 201, {"title": case})
         conversation = data["conversation"]["id"]
         body = json.dumps({
             "conversation_id": conversation,
             "request_id": uuid.uuid4().hex,
             "provider": "local-test",
-            "model": "short-timeout" if case == "model-timeout" else "long-timeout",
+            "model": model,
             "stream": True,
             "content": case,
         }).encode()
@@ -238,8 +278,33 @@ class Chat:
                 yield conversation, peer, wire, started
 
 
+def model_config(name, port, timeout):
+    return {
+        "provider": "local-test", "model": name, "api": "openai-completions",
+        "base_url": f"http://{HOST}:{port}/v1",
+        "api_key": "local-sse-regression", "timeout_ms": timeout * 1000,
+        "max_response_bytes": 16 * 1024 * 1024,
+    }
+
+
+def timeout_models(port):
+    short_idle = {"stream_idle_timeout_ms": round(UPSTREAM_IDLE_SECONDS * 1000)}
+    return [
+        model_config("long-timeout", port, IDLE_SECONDS + 25),
+        {**model_config("steady-upstream", port, IDLE_SECONDS + 25), "stream_idle_timeout_ms": 6000},
+        {**model_config("short-timeout", port, MODEL_TIMEOUT_SECONDS), **short_idle},
+        {**model_config("short-upstream-idle", port, 8), **short_idle},
+        {
+            **model_config("stalled-tls", port, 8),
+            "base_url": f"https://{HOST}:{port}/v1",
+            "connect_timeout_ms": round(CONNECT_TIMEOUT_SECONDS * 1000),
+            "stream_idle_timeout_ms": 250,
+        },
+    ]
+
+
 @contextmanager
-def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
+def chat_server(binary, model, mysql_port, redis_port, *, server_options=None, model_options=None, models=None):
     with tempfile.TemporaryDirectory(prefix="chat-sse-") as directory:
         with socket.socket() as reservation:
             reservation.bind((HOST, 0))
@@ -255,13 +320,8 @@ def chat_server(binary, model, mysql_port, redis_port, *, server_options=None):
         namespace = f"sse-test:{uuid.uuid4().hex}"
         config["auth"].update(secure_cookie=False, key_namespace=f"{namespace}:auth",
                               session_namespace=f"{namespace}:session")
-        config["models"] = [
-            {
-                "provider": "local-test", "model": name, "api": "openai-completions",
-                "base_url": f"http://{HOST}:{model.server_port}/v1",
-                "api_key": "local-sse-regression", "timeout_ms": timeout * 1000,
-                "max_response_bytes": 16 * 1024 * 1024,
-            }
+        config["models"] = models if models is not None else [
+            {**model_config(name, model.server_port, timeout), **(model_options or {})}
             for name, timeout in [("long-timeout", IDLE_SECONDS + 25), ("short-timeout", MODEL_TIMEOUT_SECONDS)]
         ]
         (Path(directory) / "config.json").write_text(json.dumps(config))
@@ -344,7 +404,8 @@ def frames(wire, started):
 
 
 def completed_stream(chat, case):
-    with chat.stream(case) as (_, _, response, started):
+    model = "steady-upstream" if case == "body" else "long-timeout"
+    with chat.stream(case, model=model) as (_, _, response, started):
         observed = list(frames(response, started))
     events = [frame["event"] for _, frame in observed if "event" in frame]
     expected_delta_count = 17 if case == "body" else 1
@@ -383,23 +444,101 @@ def idle_connection(chat, case):
 
 
 def model_timeout(chat):
-    with chat.stream("model-timeout") as (conversation, _, response, started):
+    with chat.stream("model-timeout", model="short-timeout") as (conversation, _, response, started):
         observed = [(elapsed, frame["event"], json.loads(frame["data"]))
                     for elapsed, frame in frames(response, started) if "event" in frame]
-    require([event for _, event, _ in observed] == ["meta", "delta", "error"],
-            f"expected meta, delta, error; got {observed}")
-    elapsed, _, error = observed[-1]
-    require(MODEL_TIMEOUT_SECONDS - 0.25 <= elapsed < MODEL_TIMEOUT_SECONDS + 5 and
-            error["code"] == "generation_failed" and TIMEOUT_MESSAGE in error["error"],
-            f"expected model timeout SSE error at about {MODEL_TIMEOUT_SECONDS}s, got {error} at {elapsed:.2f}s")
+    require([event for _, event, _ in observed] == ["meta", "delta", "reasoning_delta", "error"],
+            f"expected meta, delta, reasoning_delta, error; got {observed}")
+    error_at, _, error = observed[-1]
+    elapsed = error_at - observed[0][0]
+    require(MODEL_TIMEOUT_SECONDS - 0.25 <= elapsed < MODEL_TIMEOUT_SECONDS + 0.8 and
+            error["code"] == "upstream_timeout" and TOTAL_TIMEOUT_MESSAGE in error["error"],
+            f"expected total timeout at about {MODEL_TIMEOUT_SECONDS}s, got {error} at {elapsed:.2f}s")
     require(observed[1][2]["text"] == "partial reply", "missing streamed partial reply")
-    result, _ = chat.api(f"/api/conversation?id={conversation}", 200)
-    assistant_id = observed[0][2]["assistant_message_id"]
-    reply = next(item for item in result["messages"] if item["id"] == assistant_id)
-    require(result["conversation"]["active_message_id"] is None and reply["state"] == "failed" and
-            reply["content"] == "partial reply" and TIMEOUT_MESSAGE in reply["error"],
-            f"expected a failed reply with saved partial text and released generation slot, got {reply}")
-    return f"error at {elapsed:.2f}s, failed reply and no active generation"
+    require(observed[2][2]["text"] == "partial reasoning", "missing streamed partial reasoning")
+    reply = check_timeout_history(chat, conversation, observed)
+    require(reply["finish_reason"] == "length", f"known finish reason was lost: {reply}")
+    return f"total timeout at {elapsed:.2f}s despite upstream heartbeats, partial reply, reasoning and finish reason saved"
+
+
+def upstream_first_byte(chat):
+    with chat.stream("upstream-first-byte", model="short-upstream-idle") as (_, _, response, started):
+        observed = list(frames(response, started))
+    events = [(elapsed, frame["event"], json.loads(frame["data"]))
+              for elapsed, frame in observed if "event" in frame]
+    require([event for _, event, _ in events] == ["meta", "error"], str(events))
+    error_at, _, error = events[-1]
+    started_at = events[0][0]
+    elapsed = error_at - started_at
+    require(error["code"] == "upstream_idle_timeout" and IDLE_TIMEOUT_MESSAGE in error["error"] and
+            UPSTREAM_IDLE_SECONDS - 0.2 <= elapsed < UPSTREAM_IDLE_SECONDS + 0.8,
+            f"expected idle error at about {UPSTREAM_IDLE_SECONDS}s, got {error} at {elapsed:.2f}s")
+    require(any(started_at < received_at < error_at and frame.get("comment") == "ping"
+                for received_at, frame in observed),
+            "no browser-facing heartbeat before upstream idle timeout")
+    return f"no upstream headers or body, downstream heartbeat, idle error at {elapsed:.2f}s"
+
+
+def check_timeout_history(chat, conversation, events):
+    assistant_id = events[0][2]["assistant_message_id"]
+    view, _ = chat.api(f"/api/conversation?id={conversation}", 200)
+    reply = next(item for item in view["messages"] if item["id"] == assistant_id)
+    require(view["conversation"]["active_message_id"] is None and reply["state"] == "failed" and
+            reply["content"] == "partial reply" and reply["reasoning"] == "partial reasoning" and
+            reply["error"] == events[-1][2]["error"],
+            f"expected saved partial reply, reasoning and error with released generation slot, got {view}")
+    return reply
+
+
+def upstream_idle_after_output(chat):
+    with chat.stream("upstream-idle-after-output", model="short-upstream-idle") as (conversation, _, response, started):
+        events = [(elapsed, frame["event"], json.loads(frame["data"]))
+                  for elapsed, frame in frames(response, started) if "event" in frame]
+    require([event for _, event, _ in events] == ["meta", "delta", "reasoning_delta", "error"], str(events))
+    elapsed, _, error = events[-1]
+    silence = elapsed - events[-2][0]
+    require(error["code"] == "upstream_idle_timeout" and IDLE_TIMEOUT_MESSAGE in error["error"] and
+            UPSTREAM_IDLE_SECONDS - 0.2 <= silence < UPSTREAM_IDLE_SECONDS + 0.8,
+            f"expected idle timeout after the last bytes, got {error} after {silence:.2f}s")
+    check_timeout_history(chat, conversation, events)
+    return f"idle timeout {silence:.2f}s after the last output; partial reply and reasoning saved"
+
+
+def upstream_heartbeat_lease(chat):
+    with chat.stream("upstream-heartbeat-lease", model="short-upstream-idle") as (conversation, _, response, started):
+        events = []
+        checked = False
+        for elapsed, frame in frames(response, started):
+            if "event" in frame:
+                events.append((elapsed, frame["event"], json.loads(frame["data"])))
+            elif events and not checked and elapsed - events[0][0] > LEASE_SECONDS and frame.get("comment") == "ping":
+                view, _ = chat.api(f"/api/conversation?id={conversation}", 200)
+                require(view["conversation"]["active_message_id"] == events[0][2]["assistant_message_id"],
+                        f"generation lease expired before the first output: {view}")
+                checked = True
+    require(checked and [event for _, event, _ in events] == ["meta", "delta", "done"], str(events))
+    first_output_at, _, delta = events[1]
+    elapsed = first_output_at - events[0][0]
+    require(elapsed > LEASE_SECONDS and delta["text"] == "delayed reply", str(events))
+    view, _ = chat.api(f"/api/conversation?id={conversation}", 200)
+    assistant_id = events[0][2]["assistant_message_id"]
+    reply = next(item for item in view["messages"] if item["id"] == assistant_id)
+    require(view["conversation"]["active_message_id"] is None and reply["state"] == "completed" and
+            reply["content"] == delta["text"], f"expected the saved final reply, got {view}")
+    return f"only upstream heartbeats for {elapsed:.2f}s across a {LEASE_SECONDS}s lease, then saved reply and done"
+
+
+def model_connect_timeout(chat):
+    with chat.stream("model-connect-timeout", model="stalled-tls") as (_, _, response, started):
+        events = [(elapsed, frame["event"], json.loads(frame["data"]))
+                  for elapsed, frame in frames(response, started) if "event" in frame]
+    require([event for _, event, _ in events] == ["meta", "error"], str(events))
+    error_at, _, error = events[-1]
+    elapsed = error_at - events[0][0]
+    require(error["code"] == "upstream_connect_timeout" and
+            CONNECT_TIMEOUT_SECONDS - 0.2 <= elapsed < CONNECT_TIMEOUT_SECONDS + 0.8,
+            f"expected TLS handshake to reach the connection deadline, got {error} at {elapsed:.2f}s")
+    return f"stalled TLS timed out at {elapsed:.2f}s with a separate connection deadline"
 
 
 def server_tcp_socket(pid, server_port, client_port):
@@ -474,7 +613,11 @@ def backpressure(chat, case, pressure):
 
 
 def run_backend(name, binary, database_ports, cases):
-    with model_server() as model, chat_server(binary, model, *database_ports) as chat:
+    with model_server() as model, chat_server(
+        binary, model, *database_ports,
+        server_options={"generation_lease_ms": LEASE_SECONDS * 1000, "worker_threads": 9},
+        models=timeout_models(model.server_port),
+    ) as chat:
         checks = {
             "body": lambda: completed_stream(chat, "body"),
             "heartbeat": lambda: completed_stream(chat, "heartbeat"),
@@ -483,6 +626,10 @@ def run_backend(name, binary, database_ports, cases):
             "backpressure": lambda: backpressure(chat, "backpressure", model.pressure["backpressure"]),
             "slow-reader": lambda: backpressure(chat, "slow-reader", model.pressure["slow-reader"]),
             "model-timeout": lambda: model_timeout(chat),
+            "upstream-first-byte": lambda: upstream_first_byte(chat),
+            "upstream-idle-after-output": lambda: upstream_idle_after_output(chat),
+            "upstream-heartbeat-lease": lambda: upstream_heartbeat_lease(chat),
+            "model-connect-timeout": lambda: model_connect_timeout(chat),
         }
         failures = 0
         with ThreadPoolExecutor(max_workers=len(cases)) as pool:

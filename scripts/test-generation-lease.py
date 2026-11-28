@@ -589,9 +589,9 @@ def case_stale_takeover(chat, model, mysql_client, *, trigger_via_finish):
 
     event_names = [name for _, name, _ in events_a]
     if trigger_via_finish:
-        deltas = "".join(data["text"] for _, name, data in events_a if name == "delta")
-        require(deltas == "stale-reply",
-                f"expected Finish path after stale-reply delta, got {events_a}")
+        # The first fragment must be committed before SSE, even when upstream finishes.
+        require(event_names == ["meta", "error"],
+                f"stale Task A published an uncommitted fragment: {events_a}")
     require(event_names[-1] == "error" and "done" not in event_names,
             f"stale Task A should end with error, got {events_a}")
     require(events_a[-1][2]["code"] == "history_unavailable",

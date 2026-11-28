@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS messages (
   finish_reason VARCHAR(16) NOT NULL DEFAULT '',
   error VARCHAR(512) NOT NULL DEFAULT '',
   sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  generation_id VARCHAR(80) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  model_provider TEXT NULL,
+  model_name TEXT NULL,
+  reasoning_effort VARCHAR(8) CHARACTER SET ascii NULL,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   KEY messages_conversation (conversation_id, id),
@@ -46,6 +50,9 @@ CREATE TABLE IF NOT EXISTS turn_requests (
   request_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   user_message_id BIGINT UNSIGNED NOT NULL,
   assistant_message_id BIGINT UNSIGNED NOT NULL,
+  replay_content_bytes INT UNSIGNED NULL,
+  replay_reasoning_bytes INT UNSIGNED NULL,
+  replay_finish_reason VARCHAR(16) NULL,
   PRIMARY KEY (conversation_id, request_id),
   CONSTRAINT requests_conversation FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
