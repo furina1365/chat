@@ -411,14 +411,24 @@ tar -xzf chat-binary.tar.gz
     "top_p": null,
     "timeout_ms": 60000,
     "connect_timeout_ms": 10000,
-    "max_response_bytes": 4194304
+    "max_response_bytes": 4194304,
+    "max_stream_bytes": 67108864,
+    "max_sse_event_bytes": 262144
   }
 ]
 ```
 
 密钥填写在 `models[].api_key`，服务端读取后用于上游认证。`GET /api/models` 只返回服务商和模型名。生成参数由模型配置管理，网页请求不能覆盖。`temperature`、`top_p` 及输出上限缺省或为 `null` 时不发送对应参数；Messages 必须有输出上限，因此未设置时使用 4096。Messages 的 `temperature` 和 `top_p` 只配置其中一项。
 
-超时与大小配置必须为正整数：`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间，`max_response_bytes` 限制累计接收的上游响应字节（包括 SSE 元数据，最大允许 64 MiB）。
+超时与大小配置必须为正整数。`timeout_ms` 从实际开始调用上游时计时，`connect_timeout_ms` 限制建立连接时间。
+
+| 大小配置 | 计量范围 | 默认值 | 最大值 |
+| --- | --- | --- | --- |
+| `max_response_bytes` | 非 SSE 上游响应体 | 4 MiB | 64 MiB |
+| `max_stream_bytes` | 上游 SSE 响应体累计字节，含事件包装、元数据和心跳 | 64 MiB | 256 MiB |
+| `max_sse_event_bytes` | 解析单条上游 SSE 事件时的缓冲 | 256 KiB | 512 KiB |
+
+正文与思考解包后合计最多 4 MiB（UTF-8 字节），与历史存储上限一致。超出任一 SSE 上限时结束生成，历史保留已接收的合规增量并记录超限原因。已有配置若使用 `max_response_bytes` 控制 SSE 流大小，可改用 `max_stream_bytes`。
 
 两套后端的连接空闲上限均为 30 秒；在 `CMakeLists.txt` 中将 `set(CHAT_LOGGING ON)` 改为 `set(CHAT_LOGGING OFF)` 并重新编译后为 60 秒。从最近一次客户端读取计时，配置更长的模型超时也不能突破这一连接限制。
 

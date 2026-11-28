@@ -77,6 +77,8 @@
       "timeout_ms": 60000,
       "connect_timeout_ms": 10000,
       "max_response_bytes": 4194304,
+      "max_stream_bytes": 67108864,
+      "max_sse_event_bytes": 262144,
       "api_key": "replace-with-your-model-api-key"
     }
   ]

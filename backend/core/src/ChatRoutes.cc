@@ -1,6 +1,7 @@
 #include "ChatRoutes.hpp"
 #include "HttpSupport.hpp"
 #include "ai/ModelManager.hpp"
+#include "common/AssistantText.hpp"
 #include "history/History.hpp"
 #include "http/HttpRouter.hpp"
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -269,7 +271,6 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       if (response->cancelToken()->load() || model_cancel->load()) return false;
       auto now = std::chrono::steady_clock::now();
       auto size = completion.content.size() + completion.reasoning.size();
-      if (size > 4 * 1024 * 1024) return false;
       if (!saved_size || now - last_save >= std::chrono::milliseconds(250) || size - saved_size >= 32768)
       {
         auto saved = history.SaveProgress(user, conversation, turn.assistant_message.id,
@@ -291,7 +292,10 @@ void Generate(history::History &history, history::UserId user, history::Conversa
       completion.reasoning = reply->reasoning;
       completion.finish_reason = FinishName(reply->finish_reason);
       completion.state = (response->cancelToken()->load() || model_cancel->load()) ? history::MessageState::Interrupted : history::MessageState::Completed;
-      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal) completion.content = "模型拒绝回答此问题。";
+      constexpr std::string_view refusal = "模型拒绝回答此问题。";
+      if (completion.content.empty() && reply->finish_reason == ai::FinishReason::Refusal &&
+          completion.reasoning.size() <= kMaxAssistantTextBytes - refusal.size())
+        completion.content = refusal;
       if (completion.state == history::MessageState::Completed && completion.content.empty() && reply->finish_reason == ai::FinishReason::Length)
       {
         completion.state = history::MessageState::Failed;

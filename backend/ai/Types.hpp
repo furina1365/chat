@@ -33,11 +33,13 @@ struct ModelConfig
   std::optional<double> temperature;
   std::optional<double> top_p;
 
-  // config.json 的 models 数组中的 timeout_ms、connect_timeout_ms 和 max_response_bytes。
   // timeout 是调用总时长；客户端开始调用时据此计算 deadline。
   std::chrono::milliseconds timeout{60000};
   std::chrono::milliseconds connect_timeout{10000};
+  // 普通响应体、流式响应体和单条 SSE 事件缓冲的字节上限。
   std::size_t max_response_bytes = 4 * 1024 * 1024;
+  std::size_t max_stream_bytes = 64 * 1024 * 1024;
+  std::size_t max_sse_event_bytes = 256 * 1024;
 };
 
 // 前端仅获取这两个字段，显示为 provider/model。

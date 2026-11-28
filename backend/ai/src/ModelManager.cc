@@ -123,7 +123,9 @@ namespace ai
         throw std::runtime_error("Messages requires setting only one of temperature and top_p");
       config.timeout = std::chrono::milliseconds(Positive(item, "timeout_ms", 60000, INT_MAX));
       config.connect_timeout = std::chrono::milliseconds(Positive(item, "connect_timeout_ms", 10000, INT_MAX));
-      config.max_response_bytes = Positive(item, "max_response_bytes", 4 * 1024 * 1024, 64 * 1024 * 1024);
+      config.max_response_bytes = Positive(item, "max_response_bytes", config.max_response_bytes, 64 * 1024 * 1024);
+      config.max_stream_bytes = Positive(item, "max_stream_bytes", config.max_stream_bytes, 256 * 1024 * 1024);
+      config.max_sse_event_bytes = Positive(item, "max_sse_event_bytes", config.max_sse_event_bytes, 512 * 1024);
       auto key = Required(item, "api_key");
       ModelKey id{config.provider, config.model};
       if (models_.count(id))
